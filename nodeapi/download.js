@@ -1,0 +1,2199 @@
+const path = require("path");
+const { execFile } = require("child_process");
+const axios = require("axios");
+const { app, dialog, shell } = require("electron");
+const fs = require("fs").promises; // 使用 fs.promises 进行异步文件操作
+const logger = require("./logger");
+const {
+  detectJianyingDraftRoot,
+  getDefaultDraftRootHint,
+  hasJianyingDraftMarkers,
+  resolveDraftRootFromSelection,
+} = require("./draftPathDetect");
+const { v4: uuidv4 } = require('uuid');
+const { downloadBinaryToFile } = require("./resumableDownload");
+const draftPaths = require("./draftPaths");
+const {
+  getStagingRootDir,
+  getStagingDraftDir,
+  publishStagedDraft,
+} = require("./draftStaging");
+const { writeDraftReadmeFile } = require("./draftReadme");
+const {
+  ROOT_META_INFO_FILENAME,
+  waitForDraftDiscovery,
+} = require("./draftDiscovery");
+const {
+  isPermissionError,
+  getMacProtectedFolderName,
+  probeWriteAccess,
+  probeReadAccess,
+} = require("./filePermission");
+
+const RECORD_MAX = 500;
+
+/** 下载失败是因为没有目标目录写入权限（macOS TCC 或文件系统 ACL） */
+const DRAFT_PERMISSION_DENIED = "DRAFT_PERMISSION_DENIED";
+
+/** 尚未设置（或设置的目录无效）剪映草稿目录，渲染层据此弹出设置引导 */
+const DRAFT_DIRECTORY_REQUIRED = "DRAFT_DIRECTORY_REQUIRED";
+
+/**
+ * 下载过程中窗口可能被关闭（macOS 关窗不退出应用），
+ * 向渲染进程推送前必须确认窗口与 webContents 都仍然可用。
+ */
+function isWindowUsable(targetWindow) {
+  try {
+    if (!targetWindow || typeof targetWindow.isDestroyed !== "function") {
+      return false;
+    }
+    if (targetWindow.isDestroyed()) return false;
+    const contents = targetWindow.webContents;
+    return Boolean(
+      contents &&
+        typeof contents.isDestroyed === "function" &&
+        !contents.isDestroyed()
+    );
+  } catch {
+    // 销毁过程中访问属性也可能抛错，统一视为不可用
+    return false;
+  }
+}
+
+/** 向渲染层推送日志；窗口已销毁时跳过推送，本地日志仍会写入。 */
+function sendToRenderer(targetWindow, channel, payload) {
+  if (!isWindowUsable(targetWindow)) return false;
+  try {
+    targetWindow.webContents.send(channel, payload);
+    return true;
+  } catch (error) {
+    logger.warn(`[log] 推送 ${channel} 失败:`, error.message);
+    return false;
+  }
+}
+
+const LOG_MAX = 2000;
+
+/** 标准 Chrome 120 (Windows) 请求头指纹，降低 CDN 按 UA/客户端提示限流的概率。 */
+const CHROME_BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  Accept: "*/*",
+  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+  // 禁用压缩：Range 偏移必须对应原始字节，且 Content-Length 校验才准确。
+  "Accept-Encoding": "identity",
+  "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "cross-site",
+};
+
+const axiosConfig = {
+  method: "GET",
+  timeout: 30000, // 30秒超时
+  headers: CHROME_BROWSER_HEADERS,
+};
+
+function isHttpUrl(value) {
+  if (!value || typeof value !== "string") return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function inferMaterialSubDir(materialType, material) {
+  if (materialType === "audios") return "audios";
+  if (materialType === "videos") {
+    return material?.type === "photo" ? "images" : "videos";
+  }
+  return "misc";
+}
+
+const MIME_TO_EXT = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "image/bmp": ".bmp",
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "audio/mpeg": ".mp3",
+  "audio/mp3": ".mp3",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+};
+
+function inferExtFromContentType(contentType, fallbackExt = ".bin") {
+  if (!contentType || typeof contentType !== "string") {
+    return fallbackExt;
+  }
+  const mime = contentType.split(";")[0].trim().toLowerCase();
+  const ext = MIME_TO_EXT[mime];
+  return ext || fallbackExt;
+}
+
+function buildMaterialFilename(baseName, ext) {
+  return baseName.toLowerCase().endsWith(ext.toLowerCase()) ? baseName : `${baseName}${ext}`;
+}
+
+const IMAGE_EXTENSIONS = new Set([
+  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".jpe",
+]);
+const VIDEO_EXTENSIONS = new Set([
+  ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".flv",
+]);
+const AUDIO_EXTENSIONS = new Set([
+  ".mp3", ".wav", ".aac", ".m4a", ".flac", ".ogg", ".wma",
+]);
+
+/** 除图片/视频/音频外均视为配置文件 */
+function classifyDraftFile(filePath) {
+  const normalized = String(filePath).replace(/\\/g, "/").toLowerCase();
+  if (normalized.includes("/assets/images/")) return "image";
+  if (normalized.includes("/assets/videos/")) return "video";
+  if (normalized.includes("/assets/audios/")) return "audio";
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (VIDEO_EXTENSIONS.has(ext)) return "video";
+  if (AUDIO_EXTENSIONS.has(ext)) return "audio";
+  return "config";
+}
+
+function materialSubDirToCategory(subDir) {
+  if (subDir === "images") return "image";
+  if (subDir === "videos") return "video";
+  if (subDir === "audios") return "audio";
+  return "config";
+}
+
+function buildFileLogMessage(phase, category, sourceUrl) {
+  const kind = category === "config" ? "配置" : "资源";
+  if (phase === "loading") {
+    return `${kind} ${sourceUrl} 下载中...`;
+  }
+  if (phase === "success") {
+    return `${kind} ${sourceUrl} 下载完成`;
+  }
+  return `${kind} ${sourceUrl} 下载失败`;
+}
+
+function createDownloadProgressTracker(targetId) {
+  let seq = 0;
+  const stats = {
+    image: 0,
+    video: 0,
+    audio: 0,
+    config: 0,
+    success: 0,
+    failure: 0,
+  };
+
+  return {
+    beginFile(sourceUrl, category) {
+      stats[category] += 1;
+      return {
+        id: `file-${targetId}-${++seq}-${sourceUrl}`,
+        category,
+        sourceUrl,
+      };
+    },
+    recordSuccess() {
+      stats.success += 1;
+    },
+    recordFailure() {
+      stats.failure += 1;
+    },
+    buildSummaryMessage() {
+      const total = stats.image + stats.video + stats.audio + stats.config;
+      return `下载完成：共${total}个文件，图片：${stats.image}个，视频：${stats.video}个，音频：${stats.audio}个，配置：${stats.config}个，成功${stats.success}个，失败${stats.failure}个`;
+    },
+    get failureCount() {
+      return stats.failure;
+    },
+    get totalCount() {
+      return stats.image + stats.video + stats.audio + stats.config;
+    },
+  };
+}
+
+async function logFileDownloadStatus(parentWindow, logMeta, phase) {
+  const level =
+    phase === "loading" ? "loading" : phase === "success" ? "success" : "error";
+  await upsertDownloadLog(
+    {
+      id: logMeta.id,
+      level,
+      message: buildFileLogMessage(phase, logMeta.category, logMeta.sourceUrl),
+    },
+    parentWindow
+  );
+}
+
+function extractFileNameFromUrl(fileUrl) {
+  try {
+    return path.basename(new URL(fileUrl).pathname) || "未知文件";
+  } catch {
+    return "未知文件";
+  }
+}
+
+async function markFileDownloadFailed(parentWindow, tracker, sourceUrl) {
+  const category = classifyDraftFile(extractFileNameFromUrl(sourceUrl));
+  const logMeta = tracker.beginFile(sourceUrl, category);
+  await logFileDownloadStatus(parentWindow, logMeta, "error");
+  tracker.recordFailure();
+}
+
+async function downloadRemoteMaterial(fileUrl, draftRootDir, subDir, baseName, fallbackExt) {
+  const destDir = draftPaths.materialLocalDir(draftRootDir, subDir);
+  const fallbackPath = path.join(destDir, buildMaterialFilename(baseName, fallbackExt));
+
+  return withDownloadSlot(() =>
+    downloadBinaryToFile(fileUrl, {
+      destPath: fallbackPath,
+      resolveDestPath: (headers) => {
+        const ext = inferExtFromContentType(headers["content-type"], fallbackExt);
+        return path.join(destDir, buildMaterialFilename(baseName, ext));
+      },
+      requestHeaders: axiosConfig.headers,
+    })
+  );
+}
+
+function sanitizeFilename(value) {
+  if (!value || typeof value !== "string") return "";
+  return value.replace(/[\\/:*?"<>|]/g, "_").trim();
+}
+
+/**
+ * Windows 上“权限异常”多与只读属性有关；Node 对文件的 fs.chmod(0o666) 会清除只读位。
+ * 下载完成后统一处理，避免 copyFile / 外部软件间歇性带上只读导致剪映无法改写素材。
+ */
+async function ensureWindowsDraftFilesWritable(rootDir) {
+  if (process.platform !== "win32" || !rootDir) return;
+  const stack = [rootDir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(current, ent.name);
+      if (ent.isSymbolicLink()) continue;
+      try {
+        if (ent.isDirectory()) {
+          stack.push(full);
+        } else if (ent.isFile()) {
+          await fs.chmod(full, 0o666);
+        }
+      } catch (e) {
+        logger.warn(`[perm] 无法调整文件权限（已跳过）: ${full} — ${e.message}`);
+      }
+    }
+  }
+}
+
+/** 单个草稿最多同时下载的文件数 */
+const MAX_CONCURRENT_DOWNLOADS = 10;
+/** 单个文件首次尝试 + 最多 10 次重试（与服务端 _MAX_RETRIES 语义一致） */
+const MAX_DOWNLOAD_RETRIES = 10;
+const MAX_DOWNLOAD_ATTEMPTS = MAX_DOWNLOAD_RETRIES + 1;
+
+/**
+ * 简单并发限流器：任务只有在拿到槽位后才开始。
+ * 用于把「文件列表下载」和「草稿内远程素材下载」统一限制在 10 路以内。
+ */
+function createConcurrencyLimiter(limit) {
+  let active = 0;
+  const queue = [];
+
+  const pump = () => {
+    while (active < limit && queue.length > 0) {
+      const job = queue.shift();
+      active += 1;
+      Promise.resolve()
+        .then(job.task)
+        .then(job.resolve, job.reject)
+        .finally(() => {
+          active -= 1;
+          pump();
+        });
+    }
+  };
+
+  return (task) =>
+    new Promise((resolve, reject) => {
+      queue.push({ task, resolve, reject });
+      pump();
+    });
+}
+
+const withDownloadSlot = createConcurrencyLimiter(MAX_CONCURRENT_DOWNLOADS);
+
+/**
+ * 并发执行 worker，最多 limit 个同时运行；任一项抛错后不再启动新任务，
+ * 等在跑的任务结束后抛出第一个错误（用于权限错误时快速中止整批下载）。
+ */
+async function mapLimit(items, limit, worker) {
+  if (!items.length) return [];
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  let stopped = false;
+  let firstError = null;
+
+  async function runner() {
+    while (!stopped) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      try {
+        results[index] = await worker(items[index], index);
+      } catch (error) {
+        stopped = true;
+        if (firstError == null) firstError = error;
+        return;
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => runner())
+  );
+  if (firstError != null) throw firstError;
+  return results;
+}
+
+/**
+ * 拉取 get_draft：最多 3 次。
+ * 远端接口 TTFB 常见 0.9s–2s+（冷连接含 DNS/TLS），旧值 800ms/3s 会把正常响应误判为失败，
+ * 且超时中断连接后重试无法复用 keep-alive，表现为「多试几次才偶尔成功」。
+ */
+const GET_DRAFT_FETCH_MAX_ATTEMPTS = 3;
+const GET_DRAFT_FETCH_DEADLINE_MS = 30000;
+const GET_DRAFT_FETCH_PER_ATTEMPT_MAX_MS = 15000;
+const GET_DRAFT_FETCH_BACKOFF_MS = [400, 1000];
+
+/** 网关/限流等暂时不可用，退避重试有效；500 多为 OSS/Nginx 的瞬时内部错误，与 capcut-mate 服务端一致 */
+const RETRYABLE_TRANSIENT_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/**
+ * DNS 解析小预算，与 capcut-mate 服务端的 _DNS_RETRY_BUDGET 对齐。
+ * ENOTFOUND 是 NXDOMAIN，多为解析链路瞬时抖动，但域名真不可达时不该耗满整个重试预算。
+ */
+const DNS_RETRY_BUDGET = 3;
+
+/** 服务端 body 里的系统错误码（见服务端 src/middlewares/response.py 与 exceptions.py） */
+const RETRYABLE_API_CODES = new Set([9998, 9999]);
+
+/** 限流/网关错误退避：1s 起指数增长，上限 30s */
+const TRANSIENT_HTTP_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000];
+const TRANSIENT_HTTP_BACKOFF_MAX_MS = 30000;
+
+/** 网络/流错误默认固定退避 */
+const DEFAULT_RETRY_DELAY_MS = 1000;
+
+/** 从 axios 错误或手动抛出的 Error 消息中解析 HTTP 状态码 */
+function getHttpStatusFromError(error) {
+  if (error?.response?.status != null) {
+    return error.response.status;
+  }
+  const match = /status code:\s*(\d+)/i.exec(String(error?.message || ""));
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function isTransientHttpError(error) {
+  const status = getHttpStatusFromError(error);
+  return status !== null && RETRYABLE_TRANSIENT_HTTP_STATUSES.has(status);
+}
+
+/** 解析 Retry-After（秒或 HTTP 日期），返回毫秒；无法解析时返回 null */
+function parseRetryAfterMs(headers) {
+  if (!headers) return null;
+  const raw = headers["retry-after"] ?? headers["Retry-After"];
+  if (raw == null || raw === "") return null;
+
+  const asSeconds = Number(raw);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+    return Math.min(asSeconds * 1000, TRANSIENT_HTTP_BACKOFF_MAX_MS);
+  }
+
+  const retryAt = Date.parse(String(raw));
+  if (Number.isFinite(retryAt)) {
+    return Math.min(Math.max(0, retryAt - Date.now()), TRANSIENT_HTTP_BACKOFF_MAX_MS);
+  }
+  return null;
+}
+
+/**
+ * 计算下次重试前的等待时间。
+ * @param {unknown} error 本次失败错误
+ * @param {number} failedAttempt 已失败的尝试序号（1-based）
+ */
+function getRetryDelayMs(error, failedAttempt) {
+  const retryAfterMs = parseRetryAfterMs(error?.response?.headers);
+  if (retryAfterMs != null) {
+    return retryAfterMs;
+  }
+
+  if (isTransientHttpError(error)) {
+    const idx = Math.min(Math.max(failedAttempt - 1, 0), TRANSIENT_HTTP_BACKOFF_MS.length - 1);
+    return Math.min(
+      TRANSIENT_HTTP_BACKOFF_MS[idx] ?? TRANSIENT_HTTP_BACKOFF_MS.at(-1),
+      TRANSIENT_HTTP_BACKOFF_MAX_MS
+    );
+  }
+
+  return DEFAULT_RETRY_DELAY_MS;
+}
+
+/**
+ * 判断下载错误是否值得重试。
+ * @param {unknown} error 本次失败错误
+ * @param {number} attempt 刚失败的尝试序号（1-based），用于 DNS 这类小预算判定
+ * - HTTP：408 / 429 / 500 / 502 / 503 / 504 可重试（限流/网关暂时不可用）；404 等 4xx 不重试
+ * - 网络：连接拒绝不重试；DNS 解析失败（ENOTFOUND）按 DNS_RETRY_BUDGET 小预算重试；
+ *   超时、连接重置、EAI_AGAIN 等可重试
+ * - 流写入/读取中断可重试
+ */
+function isRetryableDownloadError(error, attempt = 1) {
+  if (!error) return false;
+
+  // 权限错误重试多少次都不会成功，反而会拖慢失败反馈
+  if (isPermissionError(error)) return false;
+
+  const status = getHttpStatusFromError(error);
+  if (status !== null) {
+    return RETRYABLE_TRANSIENT_HTTP_STATUSES.has(status);
+  }
+
+  const code = error.code;
+  if (code === "ECONNREFUSED") return false;
+  if (code === "ENOTFOUND") return attempt <= DNS_RETRY_BUDGET;
+  if (
+    code === "ECONNABORTED" ||
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "EAI_AGAIN"
+  ) {
+    return true;
+  }
+
+  const message = String(error.message || "");
+  if (/write file failed|download stream error/i.test(message)) {
+    return true;
+  }
+
+  if (!error.response && code) return true;
+
+  return false;
+}
+
+function isTimeoutError(error) {
+  const code = error?.code;
+  if (code === "ECONNABORTED" || code === "ETIMEDOUT" || code === "ERR_CANCELED") {
+    return true;
+  }
+  const name = error?.name;
+  if (name === "CanceledError" || name === "AbortError") {
+    return true;
+  }
+  return /timeout of \d+ms exceeded/i.test(String(error?.message || ""));
+}
+
+/**
+ * get_draft 元数据请求便宜，5xx 也值得短退避重试。
+ * 服务端始终返回 HTTP 200，真实错误码在 body 的 code 里，因此还要认信封错误码。
+ */
+function isRetryableGetDraftError(error, attempt = 1) {
+  if (RETRYABLE_API_CODES.has(error?.apiCode)) return true;
+  const status = getHttpStatusFromError(error);
+  if (status !== null && status >= 500) return true;
+  return isRetryableDownloadError(error, attempt);
+}
+
+function formatGetDraftError(error, url) {
+  if (isTimeoutError(error)) {
+    return "请求超时，请检查网络后重试";
+  }
+  if (error?.code === "ECONNREFUSED") {
+    return `无法连接到服务器: ${url}`;
+  }
+  if (error?.code === "ENOTFOUND") {
+    return `域名无法解析: ${url}`;
+  }
+  if (error?.code === "ECONNRESET" || error?.code === "EAI_AGAIN") {
+    return "网络连接中断，请稍后重试";
+  }
+  const status = getHttpStatusFromError(error);
+  if (status !== null) {
+    return `服务器返回错误 (${status})`;
+  }
+  return error?.message || "获取草稿地址失败";
+}
+
+async function requestGetDraftOnce(remoteUrl, timeoutMs) {
+  const response = await axios({
+    ...axiosConfig,
+    url: remoteUrl,
+    responseType: "json",
+    timeout: timeoutMs,
+  });
+
+  // 服务端把非 200 也改写成 HTTP 200（真实错误码在 body 的 code 里），axios 不会抛错。
+  // 必须在这里抛，才能落在 fetchGetDraftWithRetry 的重试循环内被重试。
+  // 只挂 apiCode、不挂 response：response.status 恒为 200，挂上去会让
+  // formatGetDraftError 把「服务器返回错误 (200)」当成错误原因报给用户。
+  const payload = response?.data;
+  if (payload && typeof payload.code === "number" && payload.code !== 0) {
+    const envelopeError = new Error(payload.message || `服务端返回错误 (code ${payload.code})`);
+    envelopeError.apiCode = payload.code;
+    throw envelopeError;
+  }
+
+  return response;
+}
+
+async function fetchGetDraftWithRetry(remoteUrl) {
+  const deadline = Date.now() + GET_DRAFT_FETCH_DEADLINE_MS;
+  const timeLeftMs = () => deadline - Date.now();
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= GET_DRAFT_FETCH_MAX_ATTEMPTS; attempt++) {
+    if (timeLeftMs() <= 0) break;
+
+    if (attempt > 1) {
+      const baseBackoff = GET_DRAFT_FETCH_BACKOFF_MS[attempt - 2] ?? 100;
+      const planned = isTransientHttpError(lastError)
+        ? Math.max(baseBackoff, getRetryDelayMs(lastError, attempt - 1))
+        : baseBackoff;
+      const wait = Math.min(planned, Math.max(0, timeLeftMs() - 1));
+      if (wait > 0) {
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+      if (timeLeftMs() <= 0) break;
+    }
+
+    const timeout = Math.min(
+      GET_DRAFT_FETCH_PER_ATTEMPT_MAX_MS,
+      Math.max(1, timeLeftMs())
+    );
+
+    try {
+      return await requestGetDraftOnce(remoteUrl, timeout);
+    } catch (error) {
+      lastError = error;
+      const willRetry =
+        attempt < GET_DRAFT_FETCH_MAX_ATTEMPTS &&
+        timeLeftMs() > 0 &&
+        isRetryableGetDraftError(error, attempt);
+      if (willRetry) {
+        logger.warn(
+          `[warn] get draft url attempt ${attempt}/${GET_DRAFT_FETCH_MAX_ATTEMPTS} failed: ${error.message}`
+        );
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  const timeoutError = new Error("获取草稿地址超时");
+  timeoutError.code = "ETIMEDOUT";
+  throw lastError || timeoutError;
+}
+
+async function retryDownloadTask(task, options = {}) {
+  const {
+    maxAttempts = MAX_DOWNLOAD_ATTEMPTS,
+    retryDelayMs = null,
+    isRetryableError = isRetryableDownloadError,
+    onAttempt = null,
+    onRetry = null,
+    onExhausted = null,
+  } = options;
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (typeof onAttempt === "function") {
+        await onAttempt(attempt, maxAttempts);
+      }
+      return await task(attempt, maxAttempts);
+    } catch (error) {
+      lastError = error;
+      const hasNextAttempt = attempt < maxAttempts;
+      const canRetry = hasNextAttempt && isRetryableError(error, attempt);
+
+      if (!canRetry) {
+        if (hasNextAttempt) {
+          logger.warn(
+            `[warn] download error is not retryable (attempt ${attempt}/${maxAttempts}): ${error?.message || error}`
+          );
+        } else if (typeof onExhausted === "function") {
+          await onExhausted(error, attempt, maxAttempts);
+        }
+        throw error;
+      }
+
+      const delayMs =
+        retryDelayMs != null ? retryDelayMs : getRetryDelayMs(error, attempt);
+
+      if (typeof onRetry === "function") {
+        await onRetry(error, attempt, maxAttempts, delayMs);
+      }
+      if (delayMs > 0) {
+        if (isTransientHttpError(error)) {
+          logger.warn(
+            `[warn] transient HTTP ${getHttpStatusFromError(error)}, retry in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  throw lastError || new Error("retryDownloadTask failed without explicit error");
+}
+
+async function downloadOneRemoteMaterial(
+  item,
+  materialType,
+  draftRootDir,
+  cache,
+  parentWindow,
+  tracker
+) {
+  const subDir = inferMaterialSubDir(materialType, item);
+  const category = materialSubDirToCategory(subDir);
+  const fallbackExt = materialType === "audios" ? ".mp3" : ".mp4";
+  const baseName = sanitizeFilename(item.material_name || item.name || item.id || uuidv4());
+  const sourceUrl = item.path;
+
+  const logMeta = tracker.beginFile(sourceUrl, category);
+
+  try {
+    await logFileDownloadStatus(parentWindow, logMeta, "loading");
+    let localPath;
+    await retryDownloadTask(
+      async () => {
+        localPath = await downloadRemoteMaterial(
+          sourceUrl,
+          draftRootDir,
+          subDir,
+          baseName,
+          fallbackExt
+        );
+      },
+      {
+        onRetry: async (err, attempt) => {
+          logger.warn(
+            `[warn] 下载URL素材失败，准备重试(${attempt}/${MAX_DOWNLOAD_ATTEMPTS}): ${sourceUrl}`,
+            err?.message || err
+          );
+        },
+      }
+    );
+    cache.set(sourceUrl, localPath);
+    item.path = localPath;
+    await logFileDownloadStatus(parentWindow, logMeta, "success");
+    tracker.recordSuccess();
+  } catch (err) {
+    await logFileDownloadStatus(parentWindow, logMeta, "error");
+    tracker.recordFailure();
+    logger.error(`[error] 下载URL素材失败，已达到重试上限: ${sourceUrl}`, err);
+    // 权限问题要让上层立即中止整批下载，而不是继续下载其余文件
+    if (isPermissionError(err)) throw err;
+    item.path = cache.get(sourceUrl) || item.path;
+  }
+}
+
+async function localizeRemoteMaterialPaths(
+  materials,
+  draftRootDir,
+  parentWindow,
+  sharedCache = null,
+  tracker = null
+) {
+  if (!materials || typeof materials !== "object") return;
+  const supportedTypes = ["videos", "audios"];
+  const cache = sharedCache instanceof Map ? sharedCache : new Map();
+  const pendingDownloads = [];
+  const inFlightByUrl = new Map();
+
+  for (const materialType of supportedTypes) {
+    const list = materials[materialType];
+    if (!Array.isArray(list)) continue;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      if (!item || typeof item !== "object") continue;
+      if (!isHttpUrl(item.path)) continue;
+
+      const sourceUrl = item.path;
+
+      if (cache.has(sourceUrl)) {
+        item.path = cache.get(sourceUrl);
+        continue;
+      }
+
+      if (inFlightByUrl.has(sourceUrl)) {
+        pendingDownloads.push(
+          inFlightByUrl.get(sourceUrl).then((localPath) => {
+            item.path = localPath;
+          })
+        );
+        continue;
+      }
+
+      let downloadTask;
+      if (!tracker) {
+        downloadTask = (async () => {
+          try {
+            const subDir = inferMaterialSubDir(materialType, item);
+            const fallbackExt = materialType === "audios" ? ".mp3" : ".mp4";
+            const baseName = sanitizeFilename(
+              item.material_name || item.name || item.id || uuidv4()
+            );
+            const localPath = await downloadRemoteMaterial(
+              sourceUrl,
+              draftRootDir,
+              subDir,
+              baseName,
+              fallbackExt
+            );
+            cache.set(sourceUrl, localPath);
+            return localPath;
+          } catch (err) {
+            logger.error(`[error] 下载URL素材失败: ${sourceUrl}`, err);
+            if (isPermissionError(err)) throw err;
+            return cache.get(sourceUrl) || sourceUrl;
+          }
+        })();
+      } else {
+        downloadTask = downloadOneRemoteMaterial(
+          item,
+          materialType,
+          draftRootDir,
+          cache,
+          parentWindow,
+          tracker
+        ).then(() => cache.get(sourceUrl) || item.path);
+      }
+
+      inFlightByUrl.set(sourceUrl, downloadTask);
+      pendingDownloads.push(
+        downloadTask.then((localPath) => {
+          item.path = localPath;
+        })
+      );
+    }
+  }
+
+  if (pendingDownloads.length > 0) {
+    await Promise.all(pendingDownloads);
+  }
+}
+
+function getConfigPath() {
+  return path.join(app.getPath("userData"), "app-config.json");
+}
+
+async function readConfig() {
+  const configPath = getConfigPath();
+  logger.info("[log] Config path:", configPath);
+  try {
+    const data = await fs.readFile(configPath, "utf8");
+    return JSON.parse(data) || {};
+  } catch (error) {
+    return {};
+  }
+}
+
+async function writeConfig(config) {
+  const configPath = getConfigPath();
+  try {
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
+    return true;
+  } catch (error) {
+    logger.error("写入配置文件失败:", error);
+    return false;
+  }
+}
+
+/**
+ * 未配置草稿路径时，按平台规则自动探测并写入配置。
+ */
+async function ensureAutoDetectedDraftPathInConfig() {
+  let config = await readConfig();
+  if (config.targetDirectory) {
+    return config;
+  }
+  const detected = await detectJianyingDraftRoot();
+  if (detected) {
+    config.targetDirectory = detected;
+    await writeConfig(config);
+    logger.info("[draft-detect] 已自动识别剪映草稿目录:", detected);
+  }
+  return config;
+}
+
+/** 持久化草稿目录配置。 */
+async function saveDraftPathToConfig(targetDir) {
+  const config = await readConfig();
+  config.targetDirectory = targetDir;
+  await writeConfig(config);
+  return config;
+}
+
+/**
+ * 当前草稿目录的完整状态，供渲染层展示设置引导。
+ *
+ * ready 表示可以继续下载。needs_permission 也算 ready：目录存在但系统
+ * 拒绝读取时无法校验结构，交给下载前的真实写入预检与授权引导处理，
+ * 避免把已经授权过的用户反复打回设置流程。
+ *
+ * @returns {Promise<{
+ *   configured: boolean,
+ *   ready: boolean,
+ *   reason: 'ready'|'not_configured'|'missing'|'not_draft_root'|'needs_permission',
+ *   targetDirectory: string,
+ *   verified: boolean,
+ *   corrected?: boolean,
+ *   platform: NodeJS.Platform,
+ *   defaultPath: string,
+ * }>}
+ */
+async function getDraftDirectoryStatus() {
+  const platform = process.platform;
+  const defaultPath = getDefaultDraftRootHint();
+
+  let config = {};
+  try {
+    config = await ensureAutoDetectedDraftPathInConfig();
+  } catch (error) {
+    logger.warn("[draft-detect] 读取草稿目录配置失败:", error.message);
+    config = await readConfig().catch(() => ({}));
+  }
+
+  const dir = config.targetDirectory || "";
+  if (!dir) {
+    return {
+      configured: false,
+      ready: false,
+      reason: "not_configured",
+      targetDirectory: "",
+      verified: false,
+      platform,
+      defaultPath,
+    };
+  }
+
+  const access = await probeReadAccess(dir);
+  if (!access.ok) {
+    if (access.permissionDenied) {
+      return {
+        configured: true,
+        ready: true,
+        reason: "needs_permission",
+        targetDirectory: dir,
+        verified: false,
+        platform,
+        defaultPath,
+      };
+    }
+
+    // 配置的目录可能只是上一级（历史版本误选），尝试自动定位到真正的根目录
+    const resolved = await resolveDraftRootFromSelection(dir);
+    if (resolved) {
+      await saveDraftPathToConfig(resolved.path);
+      logger.info(`[draft-detect] 已自动修正草稿目录: ${dir} -> ${resolved.path}`);
+      return {
+        configured: true,
+        ready: true,
+        reason: "ready",
+        targetDirectory: resolved.path,
+        verified: true,
+        corrected: true,
+        platform,
+        defaultPath,
+      };
+    }
+
+    return {
+      configured: true,
+      ready: false,
+      reason: "missing",
+      targetDirectory: dir,
+      verified: false,
+      platform,
+      defaultPath,
+    };
+  }
+
+  const isDraftRoot = await hasJianyingDraftMarkers(dir);
+  if (!isDraftRoot) {
+    const resolved = await resolveDraftRootFromSelection(dir);
+    if (resolved) {
+      await saveDraftPathToConfig(resolved.path);
+      logger.info(`[draft-detect] 已自动修正草稿目录: ${dir} -> ${resolved.path}`);
+      return {
+        configured: true,
+        ready: true,
+        reason: "ready",
+        targetDirectory: resolved.path,
+        verified: true,
+        corrected: true,
+        platform,
+        defaultPath,
+      };
+    }
+
+    return {
+      configured: true,
+      ready: false,
+      reason: "not_draft_root",
+      targetDirectory: dir,
+      verified: true,
+      platform,
+      defaultPath,
+    };
+  }
+
+  return {
+    configured: true,
+    ready: true,
+    reason: "ready",
+    targetDirectory: dir,
+    verified: true,
+    platform,
+    defaultPath,
+  };
+}
+
+/**
+ * 用户主动触发自动检测：找到即写入配置。
+ */
+async function autoDetectDraftPath() {
+  const platform = process.platform;
+  const defaultPath = getDefaultDraftRootHint();
+
+  let detected = null;
+  try {
+    detected = await detectJianyingDraftRoot();
+  } catch (error) {
+    logger.warn("[draft-detect] 自动探测失败:", error.message);
+  }
+
+  if (!detected) {
+    return {
+      success: false,
+      code: "NOT_FOUND",
+      platform,
+      defaultPath,
+      message: "未找到剪映草稿目录",
+    };
+  }
+
+  await saveDraftPathToConfig(detected);
+  const writeCheck = await probeWriteAccess(detected);
+  logger.info("[draft-detect] 用户触发自动检测，已设置草稿目录:", detected);
+
+  return {
+    success: true,
+    targetDirectory: detected,
+    needsPermission: !writeCheck.ok && writeCheck.permissionDenied,
+    platform,
+    defaultPath,
+  };
+}
+
+/**
+ * 校验用户手动选择的目录并保存。
+ *
+ * 用户经常选中草稿根目录的上级或某份草稿的子目录，这里会自动定位到
+ * 真正的草稿根目录；完全无法识别时拒绝保存，避免剪映看不到下载的草稿。
+ */
+async function applySelectedDraftPath(selectedDir) {
+  if (!selectedDir || typeof selectedDir !== "string") {
+    return { success: false, code: "CANCELED", error: "用户取消了目录选择" };
+  }
+
+  const resolved = await resolveDraftRootFromSelection(selectedDir);
+  let candidate = "";
+  let corrected = false;
+
+  if (resolved) {
+    candidate = resolved.path;
+    corrected = resolved.corrected;
+  } else {
+    // 系统拒绝读取时无法校验目录结构；仅接受名字就是草稿根目录的路径，
+    // 避免把任意目录保存成草稿目录。
+    const readCheck = await probeReadAccess(selectedDir);
+    const looksLikeRoot =
+      path.basename(selectedDir).toLowerCase() === "com.lveditor.draft";
+    if (readCheck.permissionDenied && looksLikeRoot) {
+      candidate = selectedDir;
+    } else if (readCheck.permissionDenied) {
+      return {
+        success: false,
+        code: "NEEDS_PERMISSION",
+        selectedPath: selectedDir,
+        message:
+          "无法读取所选文件夹，可能尚未获得文件夹访问权限。请选择名为 com.lveditor.draft 的草稿目录，或先在系统设置中允许本应用访问。",
+      };
+    } else {
+      return {
+        success: false,
+        code: "NOT_DRAFT_ROOT",
+        selectedPath: selectedDir,
+        message:
+          "所选文件夹不是剪映草稿目录，请选择包含 root_meta_info.json 的 com.lveditor.draft 文件夹；若还没有该文件夹，请先打开一次剪映。",
+      };
+    }
+  }
+
+  const writeCheck = await probeWriteAccess(candidate);
+  if (!writeCheck.ok && !writeCheck.permissionDenied) {
+    return {
+      success: false,
+      code: "WRITE_FAILED",
+      selectedPath: candidate,
+      message: `所选目录无法写入：${writeCheck.message}`,
+    };
+  }
+
+  await saveDraftPathToConfig(candidate);
+  if (corrected) {
+    logger.info(
+      `[draft-detect] 已从所选位置定位到草稿目录: ${selectedDir} -> ${candidate}`
+    );
+  }
+
+  return {
+    success: true,
+    targetDirectory: candidate,
+    corrected,
+    needsPermission: !writeCheck.ok && writeCheck.permissionDenied,
+  };
+}
+
+function getDownloadLogPath() {
+  return path.join(app.getPath("userData"), "download-log.json");
+}
+
+async function readDownloadLog() {
+  const logPath = getDownloadLogPath();
+  logger.info("[log] Log path:", logPath);
+  try {
+    const data = await fs.readFile(logPath, "utf8");
+    return JSON.parse(data);
+  } catch (error) {
+    return [];
+  }
+}
+
+let logWriteChain = Promise.resolve();
+
+/**
+ * 串行化日志文件的 read-modify-write。
+ * 10 路并发下载会同时调用 upsert/append，若不加锁会互相覆盖日志条目。
+ */
+function runSerializedLogWrite(task) {
+  const result = logWriteChain.then(task, task);
+  logWriteChain = result.catch(() => {});
+  return result;
+}
+
+/**
+ *
+ * @param {*} entry {time: Date, level: 'error', message: '日志内容' }
+ */
+async function appendDownloadLog(entry, parentWindow) {
+  return runSerializedLogWrite(() =>
+    appendDownloadLogUnlocked(entry, parentWindow)
+  );
+}
+
+async function appendDownloadLogUnlocked(entry, parentWindow) {
+  const logPath = getDownloadLogPath();
+  let logs = [];
+  try {
+    logs = await readDownloadLog();
+  } catch (error) {
+    // 如果文件不存在或无法读取，初始化为空数组
+    logs = [];
+  }
+
+  entry.time = new Date();
+  console.log(`appendDownloadLog: ${JSON.stringify(entry)}`);
+  // 窗口已关闭时跳过界面推送，日志仍写入本地文件
+  sendToRenderer(parentWindow, "file-operation-log", {
+    ...entry,
+    action: "append",
+  });
+  logs.push(entry);
+  if (logs.length > LOG_MAX) {
+    logs.shift();
+  }
+  try {
+    await fs.writeFile(logPath, JSON.stringify(logs, null, 2), "utf8");
+  } catch (writeErr) {
+    logger.error("写入日志文件失败:", writeErr);
+  }
+}
+
+/**
+ * 按 id 追加或更新日志（用于草稿下载状态：正在下载 → 下载完成）
+ * @param {*} entry { id, level, message }
+ */
+async function upsertDownloadLog(entry, parentWindow) {
+  if (!entry?.id) {
+    return appendDownloadLog(entry, parentWindow);
+  }
+  return runSerializedLogWrite(() =>
+    upsertDownloadLogUnlocked(entry, parentWindow)
+  );
+}
+
+async function upsertDownloadLogUnlocked(entry, parentWindow) {
+  const logPath = getDownloadLogPath();
+  let logs = [];
+  try {
+    logs = await readDownloadLog();
+  } catch {
+    logs = [];
+  }
+
+  const now = new Date();
+  const existingIndex = logs.findIndex((item) => item.id === entry.id);
+  const storedEntry =
+    existingIndex >= 0
+      ? { ...logs[existingIndex], ...entry, time: now }
+      : { ...entry, time: now };
+
+  if (existingIndex >= 0) {
+    logs[existingIndex] = storedEntry;
+  } else {
+    logs.push(storedEntry);
+  }
+
+  if (logs.length > LOG_MAX) {
+    logs.shift();
+  }
+
+  console.log(`upsertDownloadLog: ${JSON.stringify(storedEntry)}`);
+  // 窗口已关闭时跳过界面推送，日志仍写入本地文件
+  sendToRenderer(parentWindow, "file-operation-log", {
+    ...storedEntry,
+    action: existingIndex >= 0 ? "update" : "append",
+  });
+
+  try {
+    await fs.writeFile(logPath, JSON.stringify(logs, null, 2), "utf8");
+  } catch (writeErr) {
+    logger.error("写入日志文件失败:", writeErr);
+  }
+}
+
+async function clearDownloadLog() {
+  return runSerializedLogWrite(async () => {
+    const logPath = getDownloadLogPath();
+    try {
+      await fs.writeFile(logPath, JSON.stringify([], null, 2), "utf8");
+      return true;
+    } catch (error) {
+      logger.error("清空日志文件失败:", error);
+      return false;
+    }
+  });
+}
+
+function getHistoryRecordPath() {
+  return path.join(app.getPath("userData"), "history-record.json");
+}
+
+async function readHistoryRecord() {
+  const recordPath = getHistoryRecordPath();
+  console.info("[History] Record path:", recordPath);
+  try {
+    const data = await fs.readFile(recordPath, "utf8");
+    return JSON.parse(data);
+  } catch (error) {
+    return [];
+  }
+}
+
+/**
+ *
+ * @param {*} entry {id: 'uuid', time: Date, draft_id: 'draft_id' draft_url: 'draft_url' }
+ */
+async function appendHistoryRecord(entry) {
+  const recordPath = getHistoryRecordPath();
+  let records = [];
+  try {
+    records = await readHistoryRecord();
+  } catch (error) {
+    // 如果文件不存在或无法读取，初始化为空数组
+    records = [];
+  }
+
+  console.log(`appendHistoryRecord: ${JSON.stringify(entry)}`);
+  records.push(entry);
+  if (records.length > RECORD_MAX) {
+    records.shift();
+  }
+  try {
+    await fs.writeFile(recordPath, JSON.stringify(records, null, 2), "utf8");
+  } catch (writeErr) {
+    console.error("写入草稿历史记录文件失败:", writeErr);
+  }
+}
+
+async function getDraftUrls(remoteUrl, parentWindow) {
+  logger.info("[info] get draft url");
+  try {
+    const response = await fetchGetDraftWithRetry(remoteUrl);
+
+    // 检查HTTP状态码
+    if (response.status !== 200) {
+      throw new Error(
+        `[error] [draft url] request failed, status code: ${response.status}`
+      );
+    }
+    logger.info("[success] get draft url");
+    return response.data;
+  } catch (error) {
+    const friendly = formatGetDraftError(error, remoteUrl);
+    logger.error(`[error] get draft url: ${friendly}`, error);
+    try {
+      await appendDownloadLog(
+        { level: "error", message: `获取文件列表失败：${friendly}` },
+        parentWindow
+      );
+    } catch (logError) {
+      logger.warn("[warn] failed to append get_draft error log:", logError?.message);
+    }
+    throw new Error(friendly);
+  }
+}
+
+/**
+ * 构造「没有草稿目录写入权限」的统一返回值，渲染层据此弹出授权引导。
+ */
+function buildDraftPermissionResult(targetDirectory) {
+  const folderName = getMacProtectedFolderName(targetDirectory);
+  const isMac = process.platform === "darwin";
+  const message = isMac
+    ? `无法写入剪映草稿目录：macOS 未授予${folderName ? `「${folderName}」` : ""}文件夹访问权限`
+    : `无法写入剪映草稿目录：${targetDirectory}`;
+  return {
+    success: false,
+    code: DRAFT_PERMISSION_DENIED,
+    platform: process.platform,
+    targetDirectory: targetDirectory || "",
+    protectedFolder: folderName,
+    message,
+  };
+}
+
+/**
+ * 检测草稿目录权限。授权弹窗会高频轮询，这里用只读探测，
+ * 避免反复往剪映草稿根目录写入临时文件；下载前另有真实写入预检。
+ */
+async function checkDraftDirectoryPermission(targetDirectory) {
+  if (!targetDirectory) {
+    return {
+      ok: false,
+      permissionDenied: false,
+      code: "NO_TARGET_DIRECTORY",
+      platform: process.platform,
+      targetDirectory: "",
+      protectedFolder: "",
+    };
+  }
+  let probe = await probeReadAccess(targetDirectory);
+  // 目录还不存在时只读探测会返回 ENOENT；改用写探针，
+  // 授权完成后顺带把目录建出来，避免引导页一直停在「等待授权」。
+  if (!probe.ok && probe.code === "ENOENT") {
+    probe = await probeWriteAccess(targetDirectory);
+  }
+  return {
+    ...probe,
+    platform: process.platform,
+    protectedFolder: getMacProtectedFolderName(targetDirectory),
+  };
+}
+
+/**
+ * 弹出系统目录选择框，返回用户选择的目录（取消时返回空字符串）。
+ * 目录合法性统一交给 applySelectedDraftPath 校验，避免这里只验证写入权限。
+ */
+async function showDraftDirectoryPicker(parentWindow = null) {
+  const config = await readConfig();
+  const dialogOptions = {
+    properties: ["openDirectory"],
+    title: "选择剪映草稿目录",
+    message: "请选择剪映草稿根目录（com.lveditor.draft）",
+    buttonLabel: "选择此目录",
+    defaultPath:
+      config.targetDirectory || getDefaultDraftRootHint() || undefined,
+  };
+
+  // 如果有可用父窗口，则附加到父窗口；已销毁的窗口不能作为 dialog 父级
+  if (isWindowUsable(parentWindow)) {
+    dialogOptions.window = parentWindow;
+  }
+
+  const result = await dialog.showOpenDialog(dialogOptions);
+  if (result.canceled || result.filePaths.length === 0) return "";
+  return result.filePaths[0];
+}
+
+async function updateDraftPath(parentWindow) {
+  const selectedDir = await showDraftDirectoryPicker(parentWindow);
+  if (!selectedDir) {
+    return { success: false, code: "CANCELED", error: "用户取消了目录选择" };
+  }
+  try {
+    return await applySelectedDraftPath(selectedDir);
+  } catch (error) {
+    logger.error("更新默认草稿路径失败:", error);
+    return { success: false, code: "UPDATE_FAILED", error: error.message };
+  }
+}
+
+function updateValue(current, finalKey, targetDir, oldVal, targetId) {
+  if (oldVal) {
+    // 找到ID在路径中的位置
+    const idIndex = oldVal.indexOf(targetId);
+    if (idIndex === -1) return;
+
+    // 提取ID及之后的部分作为将要下载的路径
+    const relativePath = oldVal.substring(idIndex).replaceAll("/", path.sep); // 替换为系统路径分隔符
+    // targetDir 已包含 targetId 目录，所以relativePath中的targetId要去重
+    const newRelativePath = relativePath.replace(`${targetId}${path.sep}`, "");
+    const newValue = path.join(targetDir, newRelativePath);
+    current[finalKey] = newValue;
+
+    logger.info(`✅ newValue to:`, newValue);
+  }
+}
+
+// 递归遍历对象，更新所有名为path的属性
+function recursivelyUpdatePaths(obj, targetDir, targetId) {
+  // 处理数组
+  if (Array.isArray(obj)) {
+    obj.forEach((item) => {
+      recursivelyUpdatePaths(item, targetDir, targetId);
+    });
+    return;
+  }
+
+  // 处理对象
+  if (obj && typeof obj === "object") {
+    // 检查是否有path属性
+    if (obj.path && typeof obj.path === "string") {
+      updateValue(obj, "path", targetDir, obj.path, targetId);
+    }
+
+    // 递归处理所有属性
+    for (const key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        recursivelyUpdatePaths(obj[key], targetDir, targetId);
+      }
+    }
+  }
+}
+
+function makeTempPath(filePath) {
+  return `${filePath}.${process.pid}.${Date.now()}.${Math.random()
+    .toString(16)
+    .slice(2)}.tmp`;
+}
+
+/** 先写同目录临时文件再 rename，避免并发下载时剪映/其它任务读到半截 JSON。 */
+async function writeFileAtomic(filePath, data, options = {}) {
+  const tmpPath = makeTempPath(filePath);
+  try {
+    await fs.writeFile(tmpPath, data, options);
+    await fs.rename(tmpPath, filePath);
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function copyFileAtomic(fromPath, toPath) {
+  const tmpPath = makeTempPath(toPath);
+  try {
+    await fs.copyFile(fromPath, tmpPath);
+    await fs.rename(tmpPath, toPath);
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+// 带错误处理的JSON文件下载
+async function downloadJsonFile(
+  {
+    fileUrl,
+    filePath,
+    targetDir,
+    targetId,
+    draftFinalDir,
+    materialDownloadCache,
+    tracker,
+  },
+  parentWindow
+) {
+  // 1. 使用 Axios 下载 JSON 文件
+  try {
+    const response = await withDownloadSlot(() =>
+      axios({
+        method: "GET",
+        url: fileUrl,
+        responseType: "json", // 直接告诉 Axios 解析 JSON
+        timeout: axiosConfig.timeout,
+        headers: axiosConfig.headers,
+      })
+    );
+
+    // 检查HTTP状态码
+    if (response.status !== 200) {
+      throw new Error(
+        `[error] [json] request failed, status code: ${response.status}`
+      );
+    }
+
+    // 2. 解析获取到的数据（Axios 会根据 responseType: 'json' 自动解析）
+    const jsonData = response.data;
+
+    // 3. 修改 JSON 数据中指定键的值
+    if (jsonData?.materials) {
+      logger.info(`[log] start modifyJsonValue: materials`);
+      recursivelyUpdatePaths(jsonData.materials, targetDir, targetId);
+      // 当素材 path 为 URL 时，下载到本地并回写为本地路径。
+      await localizeRemoteMaterialPaths(
+        jsonData.materials,
+        targetDir,
+        parentWindow,
+        materialDownloadCache,
+        tracker
+      );
+      // 落盘前统一归一化为剪映的占位符相对路径, 并按实际形态重算
+      // material_save_mode（远程素材刚被下载进草稿目录，此时才可判定）。
+      const mode = draftPaths.normalizeDraftContent(jsonData, targetDir);
+      logger.info(`[log] normalized draft paths, material_save_mode=${mode}`);
+    } else if (path.basename(filePath) === "draft_meta_info.json") {
+      // 服务端写的是它自己的草稿目录绝对路径，需改写为本地路径。
+      // 这里必须写正式目录：文件虽然先落在暂存目录，发布时会整体改名过去，
+      // 若写成暂存路径，剪映会把草稿索引到隐藏的暂存目录里。
+      logger.info(`[log] localize draft_meta_info: ${filePath}`);
+      draftPaths.localizeDraftMeta(
+        jsonData,
+        draftFinalDir || targetDir,
+        targetId
+      );
+    }
+
+    // 4. 将修改后的 JSON 对象转换为格式化的字符串并原子写入本地文件
+    const jsonString = JSON.stringify(jsonData, null, 2); // 使用 2 个空格进行缩进，美化输出
+    await writeFileAtomic(filePath, jsonString, { encoding: "utf8", mode: 0o666 });
+  } catch (error) {
+    logger.error(`下载JSON文件失败: ${fileUrl}`, error);
+    throw error;
+  }
+}
+
+async function downloadNotJsonFile(
+  { fileUrl, filePath, targetDir },
+  parentWindow
+) {
+  try {
+    await withDownloadSlot(() =>
+      downloadBinaryToFile(fileUrl, {
+        destPath: filePath,
+        requestHeaders: axiosConfig.headers,
+      })
+    );
+  } catch (error) {
+    logger.error(`下载非JSON文件失败: ${fileUrl}`, error);
+    throw error;
+  }
+}
+
+/**
+ * 下载单个文件并保存到指定路径的辅助函数
+ * @param {string} url 远程文件的URL
+ * @param {string} filePath 要保存到的本地文件路径
+ */
+async function downloadSingleFile(config, parentWindow) {
+  const filePath = config.filePath;
+  const fileUrl = config.fileUrl;
+  const fileName = path.basename(filePath);
+
+  // 已知 draft_content.json 与 draft_info.json 内容一致时，直接复用，避免重复构建与重复下载 URL 素材。
+  if (fileName === "draft_info.json") {
+    const contentFilePath = path.join(path.dirname(filePath), "draft_content.json");
+    try {
+      await fs.access(contentFilePath, fs.constants.R_OK);
+      await copyFileAtomic(contentFilePath, filePath);
+      logger.info(`[log] draft_info.json 直接复用 draft_content.json: ${filePath}`);
+      return;
+    } catch {
+      // draft_content.json 不存在时回退到原逻辑，保证兼容。
+    }
+  }
+
+  if (fileUrl.endsWith(".json")) {
+    logger.info(`[log] start download json file : ${filePath}`);
+    await downloadJsonFile(config, parentWindow);
+  } else {
+    logger.info(`[log] start download non-json file : ${filePath}`);
+    await downloadNotJsonFile(config, parentWindow);
+  }
+}
+
+/**
+ * 触发目录扫描，激活剪映的目录发现机制（仅 Windows 使用）。
+ * 原理：用 robocopy 把草稿目录复制到临时目录再删除，触发
+ * ReadDirectoryChangesW 变更通知，让剪映无需重启即可感知到新草稿。
+ * macOS 不走这里：改由 draftStaging 的「暂存目录 + 原子改名」发布草稿，
+ * 剪映看到完整新目录后会直接收录（rsync 复制对 macOS 剪映无效）。
+ * @param {string} targetDir 草稿目录路径
+ */
+async function triggerDirectoryScan(targetDir) {
+  if (!targetDir) return;
+  if (process.platform !== "win32") return;
+
+  try {
+    await fs.access(targetDir);
+  } catch {
+    // 目录不存在则跳过
+    return;
+  }
+
+  const tmpDir = targetDir + ".tmp";
+
+  await new Promise((resolve) => {
+    // Windows：使用 robocopy 触发 ReadDirectoryChangesW 通知
+    const args = [
+      targetDir,
+      tmpDir,
+      "/E",        // 递归复制所有子目录
+      "/COPY:DAT", // 复制数据、属性和时间戳（无需管理员权限）
+      "/R:1",      // 失败重试1次
+      "/W:1",      // 重试等待1秒
+      "/NP",       // 不显示进度百分比
+      "/NJH",      // 不显示作业头
+      "/NJS",      // 不显示作业摘要
+    ];
+    execFile("robocopy", args, { windowsHide: true }, (err) => {
+      // robocopy 返回码 0-7 均表示成功或正常状态，8+ 才是错误
+      const code = err ? err.code : 0;
+      if (typeof code === "number" && code >= 8) {
+        logger.warn(`[scan] Windows 触发目录扫描失败，robocopy 返回码: ${code}`);
+      } else {
+        logger.info(`[scan] Windows 触发目录扫描完成，robocopy 返回码: ${code}`);
+      }
+      resolve();
+    });
+  });
+
+  // 清理临时目录
+  try {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  } catch (e) {
+    logger.warn(`[scan] 清理临时目录失败 ${tmpDir}: ${e.message}`);
+  }
+}
+
+/**
+ * 确认剪映是否已发现本次下载的草稿，并把结果写入下载日志。
+ *
+ * 草稿目录发布后（macOS 为原子改名，Windows 为 robocopy 触发扫描），剪映会把
+ * 发现的草稿登记到草稿根目录的 root_meta_info.json；轮询该文件即可确认本次
+ * 草稿是否被收录。这里只做确认，不影响下载本身的成败：剪映未运行时，它会在
+ * 下次启动扫描时重新发现草稿。
+ *
+ * @param {string} draftDir 草稿目录
+ * @param {string} draftRootDir 草稿根目录
+ * @param {string} targetId 草稿 ID
+ * @param {*} parentWindow 用于推送日志的窗口
+ * @returns {Promise<object|null>} 发现确认结果；确认过程异常时返回 null
+ */
+async function reportDraftDiscovery(draftDir, draftRootDir, targetId, parentWindow) {
+  let result;
+  try {
+    result = await waitForDraftDiscovery(draftDir, {
+      draftRootDir,
+      draftId: targetId,
+    });
+  } catch (error) {
+    logger.warn(`[scan] 确认剪映是否发现草稿失败: ${targetId}, ${error.message}`);
+    return null;
+  }
+
+  const elapsedSeconds = (result.elapsedMs / 1000).toFixed(1);
+
+  if (result.discovered) {
+    logger.info(`[scan] 剪映已发现草稿 ${targetId}（${elapsedSeconds}s）`);
+    await appendDownloadLog(
+      {
+        level: "success",
+        message: `剪映已发现草稿 ${targetId}（${elapsedSeconds}s）`,
+      },
+      parentWindow
+    );
+    return result;
+  }
+
+  if (result.reason === "root_meta_missing") {
+    const message = `未找到 ${ROOT_META_INFO_FILENAME}，无法确认剪映是否已发现草稿 ${targetId}`;
+    logger.warn(`[scan] ${message}`);
+    await appendDownloadLog({ level: "info", message }, parentWindow);
+    return result;
+  }
+
+  const message =
+    `草稿 ${targetId} 已下载，但剪映未在 ${elapsedSeconds}s 内收录该草稿` +
+    `（${ROOT_META_INFO_FILENAME} 中无记录）；` +
+    `剪映未运行时，打开剪映后会自动发现该草稿；若剪映已开启，请重启剪映`;
+  logger.warn(`[scan] ${message}, reason=${result.reason}`);
+  await appendDownloadLog({ level: "error", message }, parentWindow);
+  return result;
+}
+
+// 打开草稿目录：macOS 在访达中定位草稿文件夹，其它平台打开目录本身。
+//
+// macOS 不能直接用 shell.openPath(目录)：Electron 在 macOS 上走
+// NSWorkspace openURL，打开目录经常返回成功但访达毫无反应；即使打开了，
+// 也只是把窗口定位到目录本身，窄窗口下列视图右侧被裁掉，看起来像没打开。
+// 参考 live-mixer/LiveMix：用 `open -R` 让访达打开父目录并选中草稿文件夹，
+// 访达会被激活，目标文件夹一目了然。
+async function openDraftDirectory(dirPath) {
+  if (process.platform === "darwin") {
+    return new Promise((resolve) => {
+      execFile("/usr/bin/open", ["-R", dirPath], (error) => {
+        if (error) {
+          logger.error(
+            `[error] Failed to reveal draft folder in Finder: ${dirPath}`,
+            error.stderr || error.message
+          );
+          return resolve({ success: false, error: error.message });
+        }
+        return resolve({ success: true });
+      });
+    });
+  }
+
+  try {
+    const errorMsg = await shell.openPath(dirPath);
+    if (errorMsg) {
+      logger.error(`[error] Failed to open path: ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+    return { success: true };
+  } catch (error) {
+    logger.error(`[error] Error opening path: ${error}`);
+    return { success: false, error: error.message };
+  }
+}
+
+// 获取目标文件路径
+// 解析URL并创建必要的目录结构
+async function getTargetFilePath(fileUrl, baseTargetDir, targetId) {
+  const urlObj = new URL(fileUrl);
+  let fullPath = urlObj.pathname;
+
+  // 找到ID在路径中的位置
+  const idIndex = fullPath.indexOf(targetId);
+  if (idIndex === -1) return null;
+
+  // 提取ID及之后的部分作为将要下载的路径
+  const relativePath = fullPath.substring(idIndex).replaceAll("/", path.sep); // 替换为系统路径分隔符
+  const fullTargetPath = path.join(baseTargetDir, relativePath);
+  const targetDir = path.dirname(fullTargetPath);
+
+  logger.info("[log] fullTargetPath: " + fullTargetPath);
+  logger.info("[log] targetDir: " + targetDir);
+
+  // 确保目标目录存在
+  try {
+    await fs.mkdir(targetDir, { recursive: true }); // recursive: true 可以创建多级目录
+  } catch (mkdirError) {
+    logger.error(`创建目录失败: ${targetDir}`, mkdirError);
+    throw mkdirError;
+  }
+
+  return { fullTargetPath, targetDir };
+}
+
+// 带重试机制的单个文件下载
+async function downloadFileWithRetry(config, parentWindow, tracker) {
+  const category = classifyDraftFile(config.filePath);
+  const logMeta = tracker.beginFile(config.fileUrl, category);
+
+  try {
+    await logFileDownloadStatus(parentWindow, logMeta, "loading");
+    await retryDownloadTask(
+      async () => {
+        await downloadSingleFile(config, parentWindow);
+      },
+      {
+        onAttempt: async (attempt, maxAttempts) => {
+          logger.info(
+            `[log] start get file context : ${config.fileUrl}, attempt: ${attempt}/${maxAttempts}`
+          );
+        },
+        onRetry: async (error, attempt, maxAttempts) => {
+          logger.error(
+            `[error] download file ${config.fileUrl} failed (attempt ${attempt}/${maxAttempts}):`,
+            error
+          );
+        },
+        onExhausted: async (error, attempt, maxAttempts) => {
+          logger.error(
+            `[error] download file ${config.fileUrl} exhausted retries (attempt ${attempt}/${maxAttempts}):`,
+            error
+          );
+        },
+      }
+    );
+
+    await logFileDownloadStatus(parentWindow, logMeta, "success");
+    tracker.recordSuccess();
+    logger.info(`[log] file saved to : ${config.filePath}`);
+    return true;
+  } catch (error) {
+    await logFileDownloadStatus(parentWindow, logMeta, "error");
+    tracker.recordFailure();
+    // 权限错误上抛给批量下载主流程，触发授权引导
+    if (isPermissionError(error)) throw error;
+    return false;
+  }
+}
+
+function yieldToRenderer() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** draft_info.json 需要等 draft_content.json 完全本地化后再复制，避免复制到半成品。 */
+function isDraftInfoUrl(fileUrl) {
+  if (typeof fileUrl !== "string") return false;
+  const name = fileUrl.split("?")[0].split("/").pop();
+  return name === "draft_info.json";
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 批量下载文件主函数
+async function downloadFiles(
+  { sourceUrl, remoteFileUrls, targetId, isOpenDir },
+  parentWindow
+) {
+  try {
+    let baseTargetDir = "";
+    // 不再从下载流程里弹系统目录框：目录未设置时返回结构化错误，
+    // 由渲染层展示友好的设置引导，设置完成后再继续下载。
+    let draftDirectoryStatus = null;
+    try {
+      draftDirectoryStatus = await getDraftDirectoryStatus();
+    } catch (error) {
+      logger.error("[log] get target dir fail:", error);
+    }
+
+    if (!draftDirectoryStatus?.ready) {
+      const reason = draftDirectoryStatus?.reason || "not_configured";
+      const configuredDir = draftDirectoryStatus?.targetDirectory || "";
+      const message =
+        reason === "not_draft_root"
+          ? `当前设置的目录不是剪映草稿目录：${configuredDir}。请重新设置后再下载。`
+          : reason === "missing"
+            ? `剪映草稿目录不存在：${configuredDir || "未设置"}。请重新设置后再下载。`
+            : "尚未设置剪映草稿目录，草稿无法保存";
+
+      await appendDownloadLog(
+        {
+          level: "error",
+          message:
+            reason === "not_configured"
+              ? "尚未设置剪映草稿目录，请先完成设置"
+              : message,
+        },
+        parentWindow
+      );
+      return {
+        success: false,
+        code: DRAFT_DIRECTORY_REQUIRED,
+        reason,
+        platform: process.platform,
+        targetDirectory: configuredDir,
+        defaultPath: draftDirectoryStatus?.defaultPath || getDefaultDraftRootHint(),
+        message,
+      };
+    }
+
+    baseTargetDir = draftDirectoryStatus.targetDirectory;
+    logger.info("[log] get target dir:", baseTargetDir);
+
+    const draftLogId = `draft-${targetId}`;
+    const tracker = createDownloadProgressTracker(targetId);
+
+    // 下载前用真实写入预检目录权限：macOS TCC 拦截下 fs.access 可能误报成功
+    const writeCheck = await probeWriteAccess(baseTargetDir);
+    if (!writeCheck.ok) {
+      logger.error(`[perm] 草稿目录不可写: ${baseTargetDir}`, writeCheck.message);
+      if (writeCheck.permissionDenied) {
+        const result = buildDraftPermissionResult(baseTargetDir);
+        const hint =
+          process.platform === "darwin"
+            ? "请在「系统设置 → 隐私与安全性 → 文件与文件夹」中允许本应用访问后重试。"
+            : "请检查目录权限后重试。";
+        await upsertDownloadLog(
+          { id: draftLogId, level: "error", message: `${result.message}，下载已取消` },
+          parentWindow
+        );
+        await appendDownloadLog(
+          { level: "error", message: `${result.message}。${hint}` },
+          parentWindow
+        );
+        return result;
+      }
+
+      const message = `无法写入草稿目录：${writeCheck.message || baseTargetDir}`;
+      await upsertDownloadLog(
+        { id: draftLogId, level: "error", message },
+        parentWindow
+      );
+      await appendDownloadLog({ level: "error", message }, parentWindow);
+      return {
+        success: false,
+        code: "DRAFT_DIRECTORY_UNWRITABLE",
+        platform: process.platform,
+        targetDirectory: baseTargetDir,
+        message,
+      };
+    }
+
+    await upsertDownloadLog(
+      {
+        id: draftLogId,
+        level: "loading",
+        message: `正在下载草稿 ${targetId}`,
+      },
+      parentWindow
+    );
+
+    const materialDownloadCache = new Map();
+    let permissionError = null;
+
+    const draftFinalDir = path.join(baseTargetDir, targetId);
+
+    // macOS：剪映的目录监听只收录「一次出现就完整」的新草稿目录，直接往正式
+    // 目录里边下载边写会被跳过；因此先写隐藏暂存目录，全部就绪后再原子改名
+    // 发布（见 draftStaging.js）。暂存目录在失败时保留，重新下载可续传。
+    // Windows：「直接写正式目录 + robocopy 触发扫描」的现有流程已验证可用，
+    // 保持不动，避免发布时目录被剪映/杀软占用导致改名失败等新问题。
+    const useStaging = process.platform === "darwin";
+    const stagingRootDir = useStaging
+      ? getStagingRootDir(baseTargetDir)
+      : baseTargetDir;
+    const stagingDraftDir = useStaging
+      ? getStagingDraftDir(baseTargetDir, targetId)
+      : draftFinalDir;
+
+    logger.info(
+      `[log] download concurrency=${MAX_CONCURRENT_DOWNLOADS}, per-file retries=${MAX_DOWNLOAD_RETRIES}, draft=${targetId}`
+    );
+
+    // 2. 并发下载远程文件列表：最多 10 个任务同时进行；
+    //    draft_content.json 内的远程素材也共用同一个 10 路网络限流器。
+    const downloadOneFile = async (fileUrl) => {
+      if (permissionError) return;
+
+      try {
+        // 获取目标文件路径（写入暂存目录；正式目录只在发布时出现）
+        const targetPaths = await getTargetFilePath(
+          fileUrl,
+          stagingRootDir,
+          targetId
+        );
+
+        if (!targetPaths) {
+          logger.error(`[error] 无法获取文件的目标路径: ${fileUrl}`);
+          await markFileDownloadFailed(parentWindow, tracker, fileUrl);
+          return;
+        }
+
+        const { fullTargetPath, targetDir } = targetPaths;
+
+        await downloadFileWithRetry(
+          {
+            fileUrl,
+            filePath: fullTargetPath,
+            targetDir,
+            targetId,
+            draftFinalDir,
+            materialDownloadCache,
+            tracker,
+          },
+          parentWindow,
+          tracker
+        );
+      } catch (error) {
+        if (isPermissionError(error)) {
+          permissionError = error;
+          throw error;
+        }
+        logger.error(`[error] 处理文件时发生错误:`, error);
+        await markFileDownloadFailed(parentWindow, tracker, fileUrl);
+      }
+    };
+
+    // draft_info.json 延后到所有文件下载完再处理：此时 draft_content.json 已完成
+    // 素材本地化与原子写入，可以安全复制，避免复制到半成品或重复下载素材。
+    const deferredInfoUrls = remoteFileUrls.filter(isDraftInfoUrl);
+    const regularFileUrls = remoteFileUrls.filter((url) => !isDraftInfoUrl(url));
+
+    try {
+      await mapLimit(regularFileUrls, MAX_CONCURRENT_DOWNLOADS, downloadOneFile);
+      if (!permissionError) {
+        await mapLimit(deferredInfoUrls, MAX_CONCURRENT_DOWNLOADS, downloadOneFile);
+      }
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      permissionError = error;
+    }
+
+    // 写入权限在下载过程中丢失（例如用户在系统弹窗里点了「不允许」）：立即中止
+    if (permissionError) {
+      logger.error("[perm] 下载过程中写入被拒绝:", permissionError.message);
+      const result = buildDraftPermissionResult(baseTargetDir);
+      const hint =
+        process.platform === "darwin"
+          ? "请在「系统设置 → 隐私与安全性 → 文件与文件夹」中允许本应用访问后重试。"
+          : "请检查目录权限后重试。";
+      await upsertDownloadLog(
+        { id: draftLogId, level: "error", message: `${result.message}，下载已中止` },
+        parentWindow
+      );
+      await appendDownloadLog(
+        { level: "error", message: `${result.message}。${hint}` },
+        parentWindow
+      );
+      return result;
+    }
+
+    // 附带提示文件（参考 LiveMix）：用户直接打开草稿文件夹时，一眼知道这是
+    // 剪映草稿、不是可直接播放的成片。macOS 写进隐藏暂存目录，随原子改名
+    // 一起发布；Windows 直接写正式目录。提示文件不是草稿本体，写失败只记日志。
+    if (tracker.failureCount === 0) {
+      try {
+        await writeDraftReadmeFile(stagingDraftDir);
+      } catch (error) {
+        logger.warn(
+          `[finish] 写入草稿提示文件失败: ${stagingDraftDir}`,
+          error.message
+        );
+      }
+    }
+
+    // 等待渲染进程处理已发送的资源日志，再标记草稿完成，避免 UI 仍显示「下载中」
+    await yieldToRenderer();
+
+    const failureCount = tracker.failureCount;
+    const draftCompleteMessage =
+      failureCount === 0
+        ? `获取草稿 ${targetId} 成功`
+        : failureCount === tracker.totalCount && tracker.totalCount > 0
+          ? `获取草稿 ${targetId} 失败`
+          : `获取草稿 ${targetId} 成功（${failureCount} 个文件失败）`;
+    const draftCompleteLevel =
+      failureCount === 0
+        ? "success"
+        : failureCount === tracker.totalCount && tracker.totalCount > 0
+          ? "error"
+          : "all";
+
+    await upsertDownloadLog(
+      {
+        id: draftLogId,
+        level: draftCompleteLevel,
+        message: draftCompleteMessage,
+      },
+      parentWindow
+    );
+
+    const summaryLogId = `summary-${targetId}`;
+    await upsertDownloadLog(
+      {
+        id: summaryLogId,
+        level: failureCount === 0 ? "all" : "info",
+        message: tracker.buildSummaryMessage(),
+      },
+      parentWindow
+    );
+
+    // {id: 'uuid', time: Date, draft_id: 'draft_id', draft_url: 'draft_url' }
+    await appendHistoryRecord({
+      id: uuidv4(),
+      time: new Date(),
+      draft_id: targetId,
+      draft_url: sourceUrl,
+    });
+    let discovery = null;
+    // 草稿是否已完整落到正式目录；Windows 直接写正式目录，恒为 true。
+    let published = true;
+
+    if (useStaging) {
+      // 只有全部文件成功才发布：剪映只收录一次新目录，半成品发布后再补齐
+      // 也不会被重新索引；失败时保留暂存目录，重新下载续传补齐后再发布。
+      published = failureCount === 0 && (await pathExists(stagingDraftDir));
+      if (published) {
+        const publishResult = await publishStagedDraft(
+          stagingDraftDir,
+          draftFinalDir
+        );
+        logger.info(`[finish] published draft: ${draftFinalDir}`);
+        if (publishResult.leftoverBackupDir) {
+          logger.warn(
+            `[finish] 旧草稿目录未能删除（已留在隐藏暂存目录）: ${publishResult.leftoverBackupDir}`
+          );
+        }
+      } else {
+        const message =
+          `草稿 ${targetId} 未完整下载（${failureCount} 个文件失败），` +
+          `已保留在暂存目录，重新下载会继续下载未完成的文件`;
+        logger.warn(`[finish] draft not published: ${stagingDraftDir}`);
+        await appendDownloadLog({ level: "error", message }, parentWindow);
+      }
+    } else {
+      // Windows：保持原有流程（直接写正式目录 + robocopy 触发扫描）
+      await ensureWindowsDraftFilesWritable(draftFinalDir);
+      await triggerDirectoryScan(draftFinalDir);
+    }
+
+    // 通过 root_meta_info.json 确认剪映确实发现了本次草稿（未发现时写入错误日志）
+    if (published) {
+      discovery = await reportDraftDiscovery(
+        draftFinalDir,
+        baseTargetDir,
+        targetId,
+        parentWindow
+      );
+    }
+
+    const resultPath = published ? draftFinalDir : stagingDraftDir;
+    if (isOpenDir) await openDraftDirectory(resultPath);
+
+    return {
+      success: failureCount === 0,
+      targetDirectory: baseTargetDir,
+      jianyingDiscovered: Boolean(discovery?.discovered),
+      message: published
+        ? `文件批量保存完成，保存至目录: ${draftFinalDir}，${tracker.buildSummaryMessage()}`
+        : `草稿 ${targetId} 未完整下载，已保留在暂存目录: ${stagingDraftDir}，${tracker.buildSummaryMessage()}`,
+    };
+  } catch (error) {
+    logger.error(`[error] 批量保存过程发生错误:`, error);
+
+    if (isPermissionError(error)) {
+      const config = await readConfig().catch(() => ({}));
+      const result = buildDraftPermissionResult(config.targetDirectory || "");
+      await upsertDownloadLog(
+        {
+          id: `draft-${targetId}`,
+          level: "error",
+          message: `${result.message}，下载已中止`,
+        },
+        parentWindow
+      );
+      await appendDownloadLog(
+        {
+          level: "error",
+          message: `${result.message}。请在系统设置中授权后重试。`,
+        },
+        parentWindow
+      );
+      return result;
+    }
+
+    await upsertDownloadLog(
+      {
+        id: `draft-${targetId}`,
+        level: "error",
+        message: `获取草稿 ${targetId} 失败`,
+      },
+      parentWindow
+    );
+
+    await appendDownloadLog(
+      {
+        level: "error",
+        message: `下载失败：批量保存 ${targetId} 中的剪映草稿过程发生错误！`,
+      },
+      parentWindow
+    );
+    return { success: false, message: `保存失败: ${error.message} ` };
+  }
+}
+
+async function checkUrlAccessRight(url) {
+  try {
+    const response = await axios({
+      ...axiosConfig,
+      method: 'HEAD',
+      url: url,
+      timeout: 5000
+    });
+    logger.info(`URL Accessibility Check Result: ${url} - ${response.status}`);
+    return { accessible: response.status < 400 };
+  } catch (error) {
+    logger.error(`URL Accessibility Check Failed: ${url}`, error);
+    return { accessible: false, error: error.message };
+  }
+}
+
+module.exports = {
+  readDownloadLog,
+  clearDownloadLog,
+
+  updateDraftPath,
+
+  readConfig,
+  ensureAutoDetectedDraftPathInConfig,
+
+  getDraftDirectoryStatus,
+  autoDetectDraftPath,
+
+  getDraftUrls,
+
+  downloadFiles,
+
+  checkDraftDirectoryPermission,
+
+  checkUrlAccessRight,
+
+  readHistoryRecord,
+
+  inferExtFromContentType,
+
+  DRAFT_PERMISSION_DENIED,
+  DRAFT_DIRECTORY_REQUIRED,
+};
