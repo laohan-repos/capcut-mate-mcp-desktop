@@ -134,7 +134,9 @@ Windows 使用实际安装路径替换 `command` 和 `args` 中的路径，JSON 
 
 ### 用 MCP 创建并导入剪映草稿
 
-`create_draft` 返回草稿链接。图片和视频可以直接使用 `media_upload` 或 `media_list` 返回的本机链接，分别传给 `add_images` 和 `add_videos`。这个流程无需配置公网地址。所有时间字段使用微秒，批量素材和字幕传 JSON 数组。可使用 `add_keyframes` 等工具追加动画与效果。
+`create_draft` 返回草稿链接。使用 `media_upload` 或 `media_list` 返回的本机链接，可直接调用 `add_images`、`add_videos` 和 `add_audios`。所有时间字段使用微秒，批量素材和字幕传 JSON 数组。可使用 `add_keyframes` 等工具追加动画与效果。
+
+桌面版 v1.1.3 支持用 `get_audio_duration` 测量素材库中的本机配音时长，用 `audio_timelines` 按给定顺序排出连续时间线。将对应时间段和素材链接传给 `add_audios`，并用相同的时间段编排字幕。`easy_create_material` 也支持本机素材链接，使用上游的预设时长。这些步骤均可在公网地址留空时使用。
 
 编排完成后调用 `save_draft`，再调用 `import_draft_to_jianying`。桌面版 v1.1.2 起会把素材库里的原文件复制到剪映草稿内并更新路径。重复导入同 ID 草稿时，会返回已有目录。
 

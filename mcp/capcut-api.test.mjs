@@ -130,7 +130,7 @@ test("MCP exposes CapCut drafts alongside our media tools and imports through de
   }
 });
 
-test("official MCP submits managed picture and video references while rejecting unrelated loopback links", async () => {
+test("official MCP measures managed audio and submits managed draft references", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "capcut-local-media-test-"));
   const store = mediaStore.createMediaStore(path.join(directory, "media-store"));
   const serverPath = fileURLToPath(new URL("./media-server.mjs", import.meta.url));
@@ -143,6 +143,10 @@ test("official MCP submits managed picture and video references while rejecting 
       }
       if (url.origin !== "https://capcut-mate.jcaigc.cn") throw new Error("Unexpected request");
       const body = JSON.parse(options.body);
+      if (url.pathname.endsWith("/get_audio_duration")) {
+        if (body.mp3_url !== "https://example.test/voice.wav") throw new Error("Unexpected remote audio URL");
+        return Response.json({ code: 0, duration: 2_000_000 });
+      }
       return Response.json({ code: 0, segment_ids: ["clip-1"], submitted: body });
     };
   `;
@@ -157,19 +161,34 @@ test("official MCP submits managed picture and video references while rejecting 
   const client = new Client({ name: "capcut-mcp-local-media-test", version: "1.0.0" });
   try {
     await store.start();
-    const paths = ["视频.mp4", "配图 #1.jpg"].map((name) => path.join(directory, name));
-    await Promise.all(paths.map((filename) => fs.writeFile(filename, "test material")));
+    const paths = ["视频.mp4", "配图 #1.jpg", "配音.wav"].map((name) => path.join(directory, name));
+    const pcm = Buffer.alloc(44 + 16000);
+    pcm.write("RIFF");
+    pcm.writeUInt32LE(pcm.length - 8, 4);
+    pcm.write("WAVEfmt ", 8);
+    pcm.writeUInt32LE(16, 16);
+    pcm.writeUInt16LE(1, 20);
+    pcm.writeUInt16LE(1, 22);
+    pcm.writeUInt32LE(8000, 24);
+    pcm.writeUInt32LE(16000, 28);
+    pcm.writeUInt16LE(2, 32);
+    pcm.writeUInt16LE(16, 34);
+    pcm.write("data", 36);
+    pcm.writeUInt32LE(16000, 40);
+    await Promise.all(paths.map((filename) => fs.writeFile(filename, filename.endsWith(".wav") ? pcm : "test material")));
     await client.connect(transport);
     const draft_url = `https://capcut-mate.jcaigc.cn${prefix}get_draft?draft_id=${draftId}`;
     const uploaded = await client.callTool({ name: "media_upload", arguments: { paths } });
     assert.equal(uploaded.structuredContent.linkScope, "local");
     const video = uploaded.structuredContent.files.find((file) => file.name.endsWith(".mp4"));
     const image = uploaded.structuredContent.files.find((file) => file.name.endsWith(".jpg"));
+    const audio = uploaded.structuredContent.files.find((file) => file.name.endsWith(".wav"));
     const savedVideoUrl = new URL(video.url);
     savedVideoUrl.port = savedVideoUrl.port === "48763" ? "48764" : "48763";
     for (const [name, list, field, source, url] of [
       ["add_videos", "video_infos", "video_url", video, savedVideoUrl.href],
       ["add_images", "image_infos", "image_url", image, image.url],
+      ["add_audios", "audio_infos", "audio_url", audio, audio.url],
     ]) {
       const response = await client.callTool({
         name,
@@ -181,6 +200,32 @@ test("official MCP submits managed picture and video references while rejecting 
       assert.equal(item[field], `https://capcut-local.invalid/media/${source.id}/asset${path.extname(source.name)}`);
       const resolved = await store.resolveDraftMedia(item[field]);
       assert.equal(resolved.name, source.name);
+    }
+
+    const duration = await client.callTool({ name: "get_audio_duration", arguments: { mp3_url: audio.url } });
+    assert.equal(duration.structuredContent.duration, 1_000_000);
+    const timeline = await client.callTool({
+      name: "audio_timelines", arguments: { links: [audio.url, "https://example.test/voice.wav", audio.url] },
+    });
+    assert.deepEqual(timeline.structuredContent.timelines, [
+      { start: 0, end: 1_000_000 },
+      { start: 1_000_000, end: 3_000_000 },
+      { start: 3_000_000, end: 4_000_000 },
+    ]);
+    assert.deepEqual(timeline.structuredContent.all_timelines, [{ start: 0, end: 4_000_000 }]);
+    const badTimeline = await client.callTool({
+      name: "audio_timelines", arguments: { links: [audio.url, image.url] },
+    });
+    assert.equal(badTimeline.structuredContent.code, "MEDIA_LINK_LOCAL_ONLY");
+    assert.equal(badTimeline.structuredContent.audio_index, 1);
+
+    const quick = await client.callTool({
+      name: "easy_create_material",
+      arguments: { draft_url, audio_url: audio.url, img_url: image.url, video_url: video.url, text: "测试" },
+    });
+    for (const [field, file] of [["audio_url", audio], ["img_url", image], ["video_url", video]]) {
+      const resolved = await store.resolveDraftMedia(quick.structuredContent.submitted[field]);
+      assert.equal(resolved.id, file.id);
     }
 
     const cases = [
@@ -204,7 +249,7 @@ test("official MCP submits managed picture and video references while rejecting 
       assert.equal(data.draft_url, draft_url);
       assert.equal(data.upstream_called, false);
       assert.equal(data.retryable, false);
-      assert.equal(data.next_action.tool, name === "add_audios" ? "media_status" : "media_list");
+      assert.equal(data.next_action.tool, "media_list");
       assert.match(data.next_action.instruction, /media_list/);
       assert.equal(data.segment_ids, undefined);
     }

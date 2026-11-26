@@ -1,7 +1,10 @@
 import os from "node:os";
 import path from "node:path";
+import { createReadStream } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { parseFile } from "music-metadata";
+import { MPEGDecoder } from "mpg123-decoder";
 import { z } from "zod";
 import mediaStore from "../nodeapi/mediaStore.js";
 import draftBridge from "../nodeapi/draftImportBridge.js";
@@ -40,6 +43,22 @@ function result(data, isError = false) {
 
 function linkScope(publicBaseUrl) {
   return publicBaseUrl ? "public" : "local";
+}
+
+async function mp3PlaybackSeconds(filePath) {
+  const decoder = new MPEGDecoder({ enableGapless: true });
+  await decoder.ready;
+  try {
+    let seconds = 0;
+    for await (const chunk of createReadStream(filePath)) {
+      const { samplesDecoded, sampleRate, errors } = decoder.decode(chunk);
+      if (errors.length) throw new Error("MP3 音频解码失败。");
+      if (samplesDecoded > 0) seconds += samplesDecoded / sampleRate;
+    }
+    return seconds;
+  } finally {
+    decoder.free();
+  }
 }
 
 server.registerTool(
@@ -131,6 +150,18 @@ server.registerTool(
 registerCapcutTools(server, {
   result,
   referenceLocalMedia: store.referenceLocalMedia,
+  async readLocalAudioDuration(url) {
+    const file = await store.resolveLocalMedia(url, "audio");
+    if (!file) return null;
+    const seconds = path.extname(file.name).toLowerCase() === ".mp3"
+      ? await mp3PlaybackSeconds(file.filePath)
+      : (await parseFile(file.filePath, { duration: true, skipCovers: true })).format.duration;
+    const duration = Math.round(seconds * 1_000_000);
+    if (!Number.isSafeInteger(duration) || duration <= 0) {
+      throw new Error("无法读取本机音频时长。");
+    }
+    return duration;
+  },
   importDraft: (url, signal) => draftBridge.requestDraftImport(directory, url, signal),
 });
 

@@ -76,7 +76,7 @@ const descriptions = {
   save_draft: "保存当前草稿并返回 draft_url。添加完素材和字幕后调用。",
   get_draft: "获取已保存草稿的工程文件清单。传 draft_url 或 draft_id。",
   add_videos: "按时间轴添加一组视频。支持 media_upload 返回的本机链接，调用 import_draft_to_jianying 时会将本机素材复制进草稿。返回轨道和片段 ID。",
-  add_audios: "按时间轴添加一组配音、音乐或音效。时间单位为微秒。",
+  add_audios: "按时间轴添加配音、音乐或音效，支持素材库的本机链接。时间单位为微秒。",
   add_images: "按时间轴添加一组图片。支持 media_upload 返回的本机链接，调用 import_draft_to_jianying 时会将本机素材复制进草稿。返回 segment_ids，可接 add_keyframes 添加动画。",
   add_sticker: "用 search_sticker 返回的 sticker_id 将贴纸放到指定时间区间。",
   add_keyframes: "按 segment_id 给已有片段设置缩放、位置、旋转或透明度关键帧。",
@@ -87,19 +87,19 @@ const descriptions = {
   add_mask_keyframes: "对已有遮罩添加位置、尺寸等关键帧。",
   add_beauty: "为指定片段设置美颜、美型、美妆或美体。",
   add_text_style: "生成关键词高亮样式，供字幕编排使用。",
-  easy_create_material: "在已有草稿中快速添加一段音频及可选的图片、视频和文字。由上游决定预设时长。",
+  easy_create_material: "在已有草稿中快速添加一段音频及可选的图片、视频和文字。支持素材库的本机链接，沿用上游的预设时长。",
   get_text_animations: "查询字幕可用的入场、出场和循环动画。",
   get_image_animations: "查询图片可用的入场、出场和循环动画。",
   get_filters: "查询可用滤镜名称和分类。",
   get_text_effects: "查询可用于字幕的花字效果。",
   get_effects: "查询可用视频特效名称和分类。",
-  get_audio_duration: "读取音频直链的实际时长，返回 duration，单位微秒。",
+  get_audio_duration: "读取音频的实际时长，支持素材库的本机链接。返回 duration，单位微秒。",
   gen_video: "向 CapCut Mate 提交云端成片导出。线上调用会计费。提交成功后使用 gen_video_status 查询结果。",
   gen_video_status: "查询已提交的云端导出任务，成功时返回成片链接。",
   gen_video_active_count: "查询上游排队和进行中的云端导出数量。",
   get_points: "查询配置的简创账号积分余额。需要 CAPCUT_MATE_API_KEY。",
   timelines: "生成一组时间线区间，时间单位为微秒。",
-  audio_timelines: "根据音频链接和各自时长生成连续时间线。",
+  audio_timelines: "按音频链接的给定顺序测量时长并生成连续时间线，支持素材库的本机链接。",
   audio_infos: "将音频链接和已有时间线转换为 add_audios 所需的素材信息。",
   imgs_infos: "将图片链接和已有时间线转换为 add_images 所需的素材信息。",
   caption_infos: "将对应的文本和时间线转换成 add_captions 所需的字幕信息。",
@@ -122,7 +122,9 @@ const mediaFields = new Set(["video_url", "audio_url", "image_url", "img_url", "
 const localDraftMedia = {
   add_videos: { list: "video_infos", field: "video_url", kind: "video" },
   add_images: { list: "image_infos", field: "image_url", kind: "image" },
+  add_audios: { list: "audio_infos", field: "audio_url", kind: "audio" },
 };
+const quickMaterialKinds = { audio_url: "audio", img_url: "image", video_url: "video" };
 const serializedResults = {
   audio_infos: "infos", imgs_infos: "infos", caption_infos: "infos", effect_infos: "infos",
   filter_infos: "infos", video_infos: "infos", keyframes_infos: "keyframes_infos",
@@ -173,7 +175,9 @@ function errorData(operation, draft_url, code, message, details = {}) {
   return { operation, code, message, ...(draft_url ? { draft_url } : {}), retryable: false, ...details };
 }
 
-export function registerCapcutTools(server, { result, importDraft, referenceLocalMedia, env = process.env }) {
+export function registerCapcutTools(server, {
+  result, importDraft, referenceLocalMedia, readLocalAudioDuration, env = process.env,
+}) {
   const base = (env.CAPCUT_MATE_BASE_URL || officialBase).replace(/\/+$/, "");
   const apiKey = env.CAPCUT_MATE_API_KEY;
   const isOfficial = base === officialBase;
@@ -197,38 +201,79 @@ export function registerCapcutTools(server, { result, importDraft, referenceLoca
     return url;
   }
 
+  async function draftMediaUrl(url, field, kind) {
+    if (!loopbackMedia(url, field)) return url;
+    return await referenceLocalMedia(url, kind) ?? url;
+  }
+
   async function run(name, endpoint, args, signal) {
     const draft_url = args.draft_url;
     const readOnly = !mutations.has(name);
     if ((name === "get_points" || (name === "gen_video" && isOfficial)) && !apiKey) {
       return result(errorData(name, draft_url, "API_KEY_REQUIRED", "请在 MCP 环境中配置 CAPCUT_MATE_API_KEY。"), true);
     }
-    const local = isOfficial && localDraftMedia[name];
-    if (local && loopbackMedia(args)) {
-      const { list, field, kind } = local;
+    const localTrack = isOfficial && localDraftMedia[name];
+    const localQuickMaterial = isOfficial && name === "easy_create_material";
+    const localDuration = isOfficial && name === "get_audio_duration";
+    const needsLocalMedia = isOfficial && loopbackMedia(args);
+    if (needsLocalMedia && localDuration) {
+      try {
+        const duration = await readLocalAudioDuration(args.mp3_url);
+        if (duration !== null) return result({ code: 0, message: "success", duration });
+      } catch {
+        return result(errorData(name, draft_url, "LOCAL_AUDIO_DURATION_FAILED",
+          "无法读取素材库中这段音频的时长。请检查原文件是否完整，并确认音频格式受支持。"), true);
+      }
+    }
+    if (needsLocalMedia && name === "audio_timelines") {
+      const timelines = [];
+      let start = 0;
+      for (const [index, mp3_url] of args.links.entries()) {
+        const response = await run("get_audio_duration", endpoints.get_audio_duration, { mp3_url }, signal);
+        const data = response.structuredContent;
+        if (response.isError || data.code === "MEDIA_LINK_LOCAL_ONLY") {
+          return result({ ...data, operation: name, audio_index: index }, response.isError);
+        }
+        if (!Number.isSafeInteger(data.duration) || data.duration <= 0) {
+          return result(errorData(name, draft_url, "AUDIO_DURATION_UNAVAILABLE",
+            "未取得有效的音频时长。", { audio_index: index }), true);
+        }
+        const end = start + data.duration;
+        timelines.push({ start, end });
+        start = end;
+      }
+      return result({ code: 0, message: "success", timelines, all_timelines: [{ start: 0, end: start }] });
+    }
+    if (needsLocalMedia && localTrack) {
+      const { list, field, kind } = localTrack;
       const items = await Promise.all(args[list].map(async (item) => {
-        const url = item[field];
-        if (!loopbackMedia(url, field)) return item;
-        const reference = await referenceLocalMedia(url, kind);
-        return reference ? { ...item, [field]: reference } : item;
+        return { ...item, [field]: await draftMediaUrl(item[field], field, kind) };
       }));
       args = { ...args, [list]: items };
     }
-    if (isOfficial && loopbackMedia(args)) {
+    if (needsLocalMedia && localQuickMaterial) {
+      const entries = await Promise.all(Object.entries(args).map(async ([key, value]) => {
+        const kind = quickMaterialKinds[key];
+        return [key, kind ? await draftMediaUrl(value, key, kind) : value];
+      }));
+      args = Object.fromEntries(entries);
+    }
+    if (needsLocalMedia && loopbackMedia(args)) {
+      const acceptsManagedMedia = localTrack || localQuickMaterial || localDuration;
       return result({
         status: "needs_action",
         code: "MEDIA_LINK_LOCAL_ONLY",
         operation: name,
         ...(draft_url ? { draft_url } : {}),
-        message: local
+        message: acceptsManagedMedia
           ? "部分链接未匹配到小助手素材库中相应类型的原文件，本次未向线上 API 提交。"
           : "素材链接只能在本机访问。本次操作尚未提交到线上 API。",
         upstream_called: false,
         retryable: false,
         next_action: {
-          tool: local ? "media_list" : "media_status",
-          instruction: local
-            ? "从 media_list 选取对应图片或视频的链接。若原文件还未加入素材库，可用 media_upload 添加，再继续原草稿。"
+          tool: acceptsManagedMedia ? "media_list" : "media_status",
+          instruction: acceptsManagedMedia
+            ? "从 media_list 选取对应类型的素材链接。若原文件还未加入素材库，可用 media_upload 添加后重试。"
             : "检查 publicBaseUrl。若为空，请让用户在「配置中心 → 公网直链设置」填写可访问的公网地址。配置后用 media_list 获取已上传素材的新直链，替换链接后重试同一操作，可继续使用原草稿。",
         },
       });

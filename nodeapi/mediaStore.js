@@ -201,7 +201,7 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
     }
   }
 
-  async function referenceLocalMedia(value, kind) {
+  async function resolveLocalMedia(value, kind) {
     const url = new URL(value);
     const port = Number(url.port);
     if (url.hostname !== HOST || !validPort(port)) return null;
@@ -209,7 +209,12 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
     if (!file || !file.type.startsWith(`${kind}/`)) return null;
     // Existing links remain valid after the desktop service changes ports.
     if (url.href !== localUrl(port) + mediaPath(file.id, file.name)) return null;
-    return draftMediaReference(file);
+    return file;
+  }
+
+  async function referenceLocalMedia(value, kind) {
+    const file = await resolveLocalMedia(value, kind);
+    return file ? draftMediaReference(file) : null;
   }
 
   async function resolveDraftMedia(value) {
@@ -338,7 +343,7 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
     }
   }
 
-  const media = { getState, getFile, importFiles, saveFile, referenceLocalMedia, resolveDraftMedia };
+  const media = { getState, getFile, importFiles, saveFile, resolveLocalMedia, referenceLocalMedia, resolveDraftMedia };
   return useRunningService ? media : { ...media, start, close, setPublicBaseUrl };
 }
 
