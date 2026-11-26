@@ -2,6 +2,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 console.log('Preload script is loaded!');
 
+function subscribeToChange(channel, callback) {
+    const listener = () => callback();
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+}
+
 // 通过 contextBridge 安全地将 API 暴露给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
     // 保存文件
@@ -42,6 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getDraftDirectoryStatus: () => ipcRenderer.invoke('get-draft-directory-status'),
 
     getMediaServiceState: () => ipcRenderer.invoke('get-media-service-state'),
+    onMediaServiceChanged: (callback) => subscribeToChange('media-service-changed', callback),
     importMediaFiles: () => ipcRenderer.invoke('import-media-files'),
     saveMediaFile: (id) => ipcRenderer.invoke('save-media-file', id),
     setMediaPublicUrl: (url) => ipcRenderer.invoke('set-media-public-url', url),
@@ -67,6 +74,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     revealAppInFinder: () => ipcRenderer.invoke('reveal-app-in-finder'),
 
     getHistoryRecord: () => ipcRenderer.invoke('get-history-record'),
+    onDraftHistoryChanged: (callback) => subscribeToChange('draft-history-changed', callback),
 
     getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 

@@ -1,5 +1,5 @@
 const { randomUUID } = require("node:crypto");
-const { createReadStream, constants } = require("node:fs");
+const { createReadStream, constants, watch } = require("node:fs");
 const fs = require("node:fs/promises");
 const http = require("node:http");
 const path = require("node:path");
@@ -158,6 +158,20 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
       server.close(resolve);
       server.closeAllConnections();
     });
+  }
+
+  function watchChanges(onChange, onError) {
+    let timer;
+    const watcher = watch(directory, { persistent: false }, (_event, filename) => {
+      if (filename && filename !== "settings.json" && !FILE_ID.test(filename)) return;
+      clearTimeout(timer);
+      timer = setTimeout(onChange, 75);
+    });
+    watcher.on("error", onError);
+    return () => {
+      clearTimeout(timer);
+      watcher.close();
+    };
   }
 
   async function activeSettings() {
@@ -344,7 +358,7 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
   }
 
   const media = { getState, getFile, importFiles, saveFile, resolveLocalMedia, referenceLocalMedia, resolveDraftMedia };
-  return useRunningService ? media : { ...media, start, close, setPublicBaseUrl };
+  return useRunningService ? media : { ...media, start, close, setPublicBaseUrl, watchChanges };
 }
 
 module.exports = { createMediaStore, MEDIA_EXTENSIONS };

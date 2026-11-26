@@ -1,6 +1,6 @@
 {
   "name": "@sd/web",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "剪映小助手，用于下载剪映草稿",
   "scripts": {
     "dev": "vite",

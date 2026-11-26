@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "react-toastify";
 import electronService from "../../services/electronService";
 import "./mediaService.less";
@@ -23,26 +23,38 @@ export default function MediaServicePanel() {
   const [service, setService] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const [publicUrl, setPublicUrl] = useState("");
+  const [publicUrlInput, setPublicUrlInput] = useState(null);
   const [pending, setPending] = useState("");
+  const latestRequest = useRef(0);
+  const publicUrl = publicUrlInput ?? service?.publicBaseUrl ?? "";
 
-  async function loadService() {
-    setLoading(true);
-    setLoadError("");
+  const loadService = useCallback(async (showLoading = false) => {
+    const request = ++latestRequest.current;
+    if (showLoading) setLoading(true);
     try {
       const state = await electronService.getMediaServiceState();
-      setService(state);
-      setPublicUrl(state?.publicBaseUrl ?? "");
+      if (request === latestRequest.current) {
+        setService(state);
+        setLoadError("");
+      }
     } catch (error) {
-      setLoadError(errorMessage(error));
+      if (request === latestRequest.current) setLoadError(errorMessage(error));
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    void loadService();
-  }, []);
+    const refresh = () => void loadService();
+    const unsubscribe = electronService.onMediaServiceChanged(refresh);
+    window.addEventListener("focus", refresh);
+    void loadService(true);
+    return () => {
+      latestRequest.current += 1;
+      unsubscribe();
+      window.removeEventListener("focus", refresh);
+    };
+  }, [loadService]);
 
   async function runAction(action, operation) {
     setPending(action);
@@ -59,7 +71,7 @@ export default function MediaServicePanel() {
     return runAction("upload", async () => {
       const result = await electronService.importMediaFiles();
       if (!result) return;
-      setService(result.state);
+      await loadService();
       if (result.imported) toast.success(`已上传 ${result.imported} 个素材`);
       if (result.failures.length) {
         const first = result.failures[0];
@@ -86,9 +98,9 @@ export default function MediaServicePanel() {
   function savePublicUrl(event) {
     event.preventDefault();
     return runAction("public-url", async () => {
-      const state = await electronService.setMediaPublicUrl(publicUrl);
-      setService(state);
-      setPublicUrl(state.publicBaseUrl);
+      await electronService.setMediaPublicUrl(publicUrl);
+      await loadService();
+      setPublicUrlInput(null);
       toast.success("直链设置已保存");
     });
   }
@@ -102,7 +114,7 @@ export default function MediaServicePanel() {
         {!loading && loadError && (
           <div className="media-service-toolbar">
             <p className="media-service-error" role="alert">{loadError}</p>
-            <button type="button" className="btn btn-small" onClick={loadService}>重试</button>
+            <button type="button" className="btn btn-small" onClick={() => loadService(true)}>重试</button>
           </div>
         )}
         {!loading && !loadError && !service && (
@@ -148,14 +160,15 @@ export default function MediaServicePanel() {
                   type="url"
                   placeholder="https://media.example.com"
                   value={publicUrl}
-                  onChange={(event) => setPublicUrl(event.target.value)}
+                  onChange={(event) => setPublicUrlInput(event.target.value)}
+                  disabled={pending === "public-url"}
                 />
                 <button type="submit" className="btn btn-small" disabled={Boolean(pending)}>
                   {pending === "public-url" ? "保存中…" : "保存"}
                 </button>
               </form>
               <p className="config-hint">
-                使用线上 CapCut Mate 时，请填写已反向代理到本机服务的公网 HTTPS 地址。留空则复制本机地址。
+                图片、视频和配音可在本机使用，公网地址可以留空。云端需要直接读取素材时，再填写可访问的 HTTPS 地址。
               </p>
             </details>
           </>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "react-toastify";
 
 import {
@@ -21,73 +21,44 @@ import "./index.less";
 
 // 草稿历史记录页面组件
 function HistoryPage() {
-  // 状态管理
-  const [historyList, setHistoryList] = useState([]); // 历史记录列表
-  const [currentPage, setCurrentPage] = useState(1); // 当前页码
-  const [pageSize, setPageSize] = useState(10); // 每页记录数
-  const [totalCount, setTotalCount] = useState(0); // 总记录数
-  const [isLoading, setIsLoading] = useState(false); // 加载状态
-  const [paginationItems, setPaginationItems] = useState([]); // 分页项
+  const [historyList, setHistoryList] = useState([]);
+  const [selectedPage, setCurrentPage] = useState(1);
+  const [isLoading, setIsLoading] = useState(true);
+  const latestRequest = useRef(0);
+  const pageSize = 10;
+  const totalPages = Math.ceil(historyList.length / pageSize);
+  const currentPage = Math.min(selectedPage, Math.max(totalPages, 1));
+  const paginationItems = historyList.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
-  // 加载历史记录数据
-  const loadHistoryData = async () => {
-    setCurrentPage(1);
-    setIsLoading(true);
+  const loadHistoryData = useCallback(async () => {
+    const request = ++latestRequest.current;
     try {
-      // 从electronService获取完整历史记录
-      let allHistory = await electronService.getHistoryRecord() || [];
-      // 按时间倒序排列，使最新的草稿在最前面
-      allHistory = allHistory.sort(
-        (a, b) => new Date(b.time) - new Date(a.time),
-      );
-      setHistoryList(allHistory);
-      setTotalCount(allHistory.length || 0);
-      setPaginationItems(getPaginatedData(1, allHistory));
+      const entries = await electronService.getHistoryRecord();
+      if (request === latestRequest.current && Array.isArray(entries)) {
+        setHistoryList([...entries].sort((a, b) => new Date(b.time) - new Date(a.time)));
+      }
     } catch (error) {
-      toast.error("加载历史记录失败");
+      if (request === latestRequest.current) toast.error("加载历史记录失败");
     } finally {
-      setIsLoading(false);
+      if (request === latestRequest.current) setIsLoading(false);
     }
-  };
-
-  // 初始加载数据
-  useEffect(() => {
-    loadHistoryData();
   }, []);
 
-  // 复制草稿地址到剪贴板
-  const copyDraftUrl = (url) => {
-    navigator.clipboard
-      .writeText(url)
-      .then(() => {
-        toast.success("草稿地址已复制到剪贴板");
-      })
-      .catch(() => {
-        toast.error("复制失败，请手动复制");
-      });
-  };
+  useEffect(() => {
+    const refresh = () => void loadHistoryData();
+    const unsubscribe = electronService.onDraftHistoryChanged(refresh);
+    window.addEventListener("focus", refresh);
+    refresh();
+    return () => {
+      latestRequest.current += 1;
+      unsubscribe();
+      window.removeEventListener("focus", refresh);
+    };
+  }, [loadHistoryData]);
 
-  // 计算分页数据
-  const getPaginatedData = (
-    curPage = currentPage,
-    allHistory = historyList,
-  ) => {
-    const startIndex = (curPage - 1) * pageSize;
-    const endIndex = startIndex + pageSize;
-    return allHistory.slice(startIndex, endIndex);
-  };
-
-  // 计算总页数
-  const totalPages = useMemo(
-    () => Math.ceil(totalCount / pageSize),
-    [totalCount, pageSize],
-  );
-
-  // 处理页码变更
   const handlePageChange = (page) => {
     if (page >= 1 && page <= totalPages) {
       setCurrentPage(page);
-      setPaginationItems(getPaginatedData(page));
     }
   };
 
@@ -156,7 +127,7 @@ function HistoryPage() {
             {paginationItems.length > 0 ? (
               paginationItems.map((item, index) => (
                 <ListGroup.Item
-                  key={index}
+                  key={item.id || `${item.draft_id}-${item.time}`}
                   style={{
                     borderLeft: "none",
                     borderRight: "none",
@@ -175,6 +146,12 @@ function HistoryPage() {
                     <div style={{ fontSize: "16px", fontWeight: "500" }}>
                       草稿 #{item.id}
                     </div>
+                    {item.status === "downloaded" && (
+                      <span className="badge text-bg-success">已保存</span>
+                    )}
+                    {item.status === "incomplete" && (
+                      <span className="badge text-bg-warning">保存不完整</span>
+                    )}
                   </div>
 
                   <div className="draft-detail">
@@ -276,7 +253,7 @@ function HistoryPage() {
               ))
             ) : (
               <ListGroup.Item className="text-center py-4">
-                <div style={{ color: "#666" }}>暂无草稿记录</div>
+                <div style={{ color: "#666" }}>{isLoading ? "正在读取草稿历史…" : "暂无草稿记录"}</div>
               </ListGroup.Item>
             )}
           </ListGroup>

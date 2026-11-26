@@ -70,8 +70,25 @@ console.log(process.versions.chrome);
 function setupIpcHandlers() {
   const mediaDirectory = path.join(app.getPath('userData'), 'media-store');
   const mediaStore = createMediaStore(mediaDirectory);
-  mediaStore.start().catch((error) => logger.error('素材服务启动失败:', error));
-  app.once('will-quit', () => mediaStore.close());
+  let stopWatchingMedia;
+  let shuttingDown = false;
+  const logMediaWatchError = (error) => logger.warn('无法监听素材库变化:', error.message);
+  mediaStore.start().then(() => {
+    if (shuttingDown) return;
+    try {
+      stopWatchingMedia = mediaStore.watchChanges(() => {
+        const contents = getActiveWindow()?.webContents;
+        if (contents && !contents.isDestroyed()) contents.send('media-service-changed');
+      }, logMediaWatchError);
+    } catch (error) {
+      logMediaWatchError(error);
+    }
+  }).catch((error) => logger.error('素材服务启动失败:', error));
+  app.once('will-quit', () => {
+    shuttingDown = true;
+    stopWatchingMedia?.();
+    mediaStore.close();
+  });
   const importBridge = startDraftImportBridge(mediaDirectory, (url) => importDraftToJianying(url, getActiveWindow()))
     .catch((error) => logger.error('MCP 草稿导入服务启动失败:', error));
   app.once('will-quit', () => importBridge.then((bridge) => bridge?.close()));

@@ -1242,30 +1242,20 @@ async function readHistoryRecord() {
   }
 }
 
-/**
- *
- * @param {*} entry {id: 'uuid', time: Date, draft_id: 'draft_id' draft_url: 'draft_url' }
- */
-async function appendHistoryRecord(entry) {
-  const recordPath = getHistoryRecordPath();
-  let records = [];
-  try {
-    records = await readHistoryRecord();
-  } catch (error) {
-    // 如果文件不存在或无法读取，初始化为空数组
-    records = [];
-  }
+let historyWriteChain = Promise.resolve();
 
-  console.log(`appendHistoryRecord: ${JSON.stringify(entry)}`);
-  records.push(entry);
-  if (records.length > RECORD_MAX) {
-    records.shift();
-  }
-  try {
-    await fs.writeFile(recordPath, JSON.stringify(records, null, 2), "utf8");
-  } catch (writeErr) {
-    console.error("写入草稿历史记录文件失败:", writeErr);
-  }
+function appendHistoryRecord(entry, parentWindow) {
+  const write = historyWriteChain.then(async () => {
+    const history = await readHistoryRecord();
+    const records = Array.isArray(history) ? history : [];
+    records.push(entry);
+    await writeFileAtomic(getHistoryRecordPath(), JSON.stringify(records.slice(-RECORD_MAX), null, 2), "utf8");
+    sendToRenderer(parentWindow, "draft-history-changed");
+  });
+  historyWriteChain = write.catch((error) => {
+    logger.error("写入草稿历史记录文件失败:", error);
+  });
+  return historyWriteChain;
 }
 
 async function getDraftUrls(remoteUrl, parentWindow) {
@@ -2127,13 +2117,6 @@ async function downloadDraftFiles(
       parentWindow
     );
 
-    // {id: 'uuid', time: Date, draft_id: 'draft_id', draft_url: 'draft_url' }
-    await appendHistoryRecord({
-      id: uuidv4(),
-      time: new Date(),
-      draft_id: targetId,
-      draft_url: sourceUrl,
-    });
     let discovery = null;
     // 直接写入正式目录的下载无需发布。暂存下载只有齐全后才会发布。
     let published = true;
@@ -2175,6 +2158,15 @@ async function downloadDraftFiles(
       );
     }
 
+    const status = failureCount === 0 && published ? "downloaded" : "incomplete";
+    await appendHistoryRecord({
+      id: uuidv4(),
+      time: new Date(),
+      draft_id: targetId,
+      draft_url: sourceUrl,
+      status,
+    }, parentWindow);
+
     const resultPath = published ? draftFinalDir : stagingDraftDir;
     if (isOpenDir) await openDraftDirectory(resultPath);
 
@@ -2183,7 +2175,7 @@ async function downloadDraftFiles(
       targetDirectory: baseTargetDir,
       draft_id: targetId,
       draft_path: resultPath,
-      status: failureCount === 0 && published ? "downloaded" : "incomplete",
+      status,
       jianyingDiscovered: Boolean(discovery?.discovered),
       message: published
         ? `文件批量保存完成，保存至目录: ${draftFinalDir}，${tracker.buildSummaryMessage()}`

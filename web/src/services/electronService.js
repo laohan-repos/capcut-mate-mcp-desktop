@@ -13,6 +13,8 @@ const isElectron = () => {
 // 空实现或模拟实现（用于浏览器环境）
 const mockElectronAPI = {
   getMediaServiceState: async () => null,
+  onMediaServiceChanged: () => () => {},
+  onDraftHistoryChanged: () => () => {},
   getConfigData: async () => {
     console.warn('Electron API not available in browser: getConfigData');
     return { targetDirectory: '' };
@@ -123,6 +125,7 @@ const mockElectronAPI = {
 // 实际的Electron API（用于Electron环境）
 const electronAPI = {
   getMediaServiceState: () => window.electronAPI.getMediaServiceState(),
+  onMediaServiceChanged: (callback) => window.electronAPI.onMediaServiceChanged(callback),
   importMediaFiles: () => window.electronAPI.importMediaFiles(),
   saveMediaFile: (id) => window.electronAPI.saveMediaFile(id),
   setMediaPublicUrl: (url) => window.electronAPI.setMediaPublicUrl(url),
@@ -174,6 +177,7 @@ const electronAPI = {
   getHistoryRecord: async () => {
     return await window.electronAPI.getHistoryRecord();
   },
+  onDraftHistoryChanged: (callback) => window.electronAPI.onDraftHistoryChanged(callback),
   getAppVersion: async () => {
     return await window.electronAPI.getAppVersion();
   },
