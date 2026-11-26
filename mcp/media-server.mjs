@@ -4,6 +4,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import mediaStore from "../nodeapi/mediaStore.js";
+import draftBridge from "../nodeapi/draftImportBridge.js";
+import { registerCapcutTools } from "./capcut-api.mjs";
 
 function mediaDirectory() {
   const customDirectory = process.env.CAPCUT_MATE_MEDIA_STORE;
@@ -21,8 +23,9 @@ function mediaDirectory() {
   return path.join(appData, "capcut-mate", "media-store");
 }
 
-const store = mediaStore.createMediaStore(mediaDirectory(), { useRunningService: true });
-const server = new McpServer({ name: "capcut-media", version: "1.0.0" });
+const directory = mediaDirectory();
+const store = mediaStore.createMediaStore(directory, { useRunningService: true });
+const server = new McpServer({ name: "capcut-media", version: "1.1.0" });
 const readOnly = { readOnlyHint: true, openWorldHint: false };
 const absolutePath = z.string().min(1).refine((value) => path.isAbsolute(value), "请使用本机绝对路径。");
 
@@ -123,5 +126,10 @@ server.registerTool(
     return result({ id, name: file.name, size: file.size, destination });
   },
 );
+
+registerCapcutTools(server, {
+  result,
+  importDraft: (url, signal) => draftBridge.requestDraftImport(directory, url, signal),
+});
 
 await server.connect(new StdioServerTransport());

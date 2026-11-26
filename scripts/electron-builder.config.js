@@ -2,7 +2,7 @@
  * Electron Builder Configuration
  */
 module.exports = {
-  appId: "com.gogoshine.capcutmate",
+  appId: "cn.laohan.capcutmatemcp",
   productName: "剪映小助手",
   directories: {
     output: "dist"
@@ -19,12 +19,13 @@ module.exports = {
     "!.github",
     "!README.md",
     "!.vscode",
-    "!DS_Store",
+    "!**/.DS_Store",
+    "!**/*.test.*",
   ],
   win: {
     icon: "assets/icons/logo.ico",
     target: "nsis",
-    artifactName: "capcut-mate-windows-x64-installer.exe",
+    artifactName: "capcut-mate-windows-${arch}-installer.exe",
     // electron-builder 26：仅跳过代码签名，仍写入 exe 图标/元数据
     // （signAndEditExecutable:false 会连图标一起跳过）
     signExecutable: false
@@ -42,7 +43,8 @@ module.exports = {
     target: ["dmg"],
     artifactName: "capcut-mate-macos-${arch}-installer.dmg",
     category: "public.app-category.productivity",
-    hardenedRuntime: true,
+    identity: "-",
+    hardenedRuntime: false,
     gatekeeperAssess: false,
     entitlements: "assets/entitlements.mac.plist",
     entitlementsInherit: "assets/entitlements.mac.plist",

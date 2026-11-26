@@ -1,0 +1,2000 @@
+{
+  "upstreamCommit": "bb4e896f7a2b9cf8a6af15ea10414e7be5b3c9b6",
+  "operations": {
+    "create_draft": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "height": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "width": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "save_draft": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_videos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "SceneTimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "video_infos": {
+            "type": "string"
+          },
+          "scene_timelines": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/SceneTimelineItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "alpha": {
+            "type": "number"
+          },
+          "scale_x": {
+            "type": "number"
+          },
+          "scale_y": {
+            "type": "number"
+          },
+          "transform_x": {
+            "type": "integer"
+          },
+          "transform_y": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_audios": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "audio_infos": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_url",
+          "audio_infos"
+        ],
+        "type": "object"
+      }
+    },
+    "add_images": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "image_infos": {
+            "type": "string"
+          },
+          "alpha": {
+            "type": "number"
+          },
+          "scale_x": {
+            "type": "number"
+          },
+          "scale_y": {
+            "type": "number"
+          },
+          "transform_x": {
+            "type": "integer"
+          },
+          "transform_y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "draft_url",
+          "image_infos"
+        ],
+        "type": "object"
+      }
+    },
+    "add_sticker": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "sticker_id": {
+            "type": "string"
+          },
+          "start": {
+            "type": "integer"
+          },
+          "end": {
+            "type": "integer"
+          },
+          "scale": {
+            "type": "number"
+          },
+          "transform_x": {
+            "type": "integer"
+          },
+          "transform_y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "draft_url",
+          "sticker_id",
+          "start",
+          "end"
+        ],
+        "type": "object"
+      }
+    },
+    "add_keyframes": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "keyframes": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_captions": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "ShadowInfo": {
+            "properties": {
+              "shadow_alpha": {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "shadow_color": {
+                "type": "string"
+              },
+              "shadow_diffuse": {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "shadow_distance": {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "shadow_angle": {
+                "maximum": 180.0,
+                "minimum": -180.0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "TextBackgroundInfo": {
+            "properties": {
+              "background_color": {
+                "type": "string"
+              },
+              "background_style": {
+                "maximum": 2,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "background_alpha": {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "background_round_radius": {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "background_height": {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "background_width": {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "background_horizontal_offset": {
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              },
+              "background_vertical_offset": {
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "captions": {
+            "type": "string"
+          },
+          "text_color": {
+            "type": "string"
+          },
+          "border_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "border_alpha": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "border_width": {
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "alignment": {
+            "maximum": 5,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "alpha": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "font": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "font_size": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "letter_spacing": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "line_spacing": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "line_max_width": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "scale_x": {
+            "type": "number"
+          },
+          "scale_y": {
+            "type": "number"
+          },
+          "transform_x": {
+            "type": "number"
+          },
+          "transform_y": {
+            "type": "number"
+          },
+          "style_text": {
+            "type": "boolean"
+          },
+          "underline": {
+            "type": "boolean"
+          },
+          "italic": {
+            "type": "boolean"
+          },
+          "bold": {
+            "type": "boolean"
+          },
+          "has_shadow": {
+            "type": "boolean"
+          },
+          "shadow_info": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ShadowInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "has_background": {
+            "type": "boolean"
+          },
+          "background_info": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TextBackgroundInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text_effect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text_bubble": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text_glow": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_effects": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "effect_infos": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_filters": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "filter_infos": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_masks": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "segment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "X": {
+            "type": "integer"
+          },
+          "Y": {
+            "type": "integer"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "feather": {
+            "type": "integer"
+          },
+          "rotation": {
+            "type": "integer"
+          },
+          "invert": {
+            "type": "boolean"
+          },
+          "roundCorner": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_mask_keyframes": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "MaskKeyframeItem": {
+            "properties": {
+              "segment_id": {
+                "type": "string"
+              },
+              "offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "X": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "Y": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "width": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "height": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "feather": {
+                "anyOf": [
+                  {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rotation": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "segment_id",
+              "offset"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "keyframes": {
+            "items": {
+              "$ref": "#/$defs/MaskKeyframeItem"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_beauty": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "BeautyBodyGroup": {
+            "additionalProperties": false,
+            "properties": {
+              "small_head": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "swan_neck": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "slim_arm": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "straight_shoulder": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "slim_body": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "slim_waist": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "long_leg": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "plump_breast": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "slim_hip": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "smooth": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "whitening": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "wide_shoulder": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "BeautyMakeupGroup": {
+            "additionalProperties": false,
+            "properties": {
+              "look": {
+                "type": "string"
+              },
+              "intensity": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "face_id": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "BeautyShapeGroup": {
+            "additionalProperties": false,
+            "properties": {
+              "small_face": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "slim": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "v_shape": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "jaw": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "cheekbone": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "shorten": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "contour_smooth": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "lower": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "middle": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "upper": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "hairline": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "width": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "chin_length": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "BeautySkinGroup": {
+            "additionalProperties": false,
+            "properties": {
+              "even": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "plump": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "smooth": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "dewrinkle": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "bright_eye": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "dark_circle": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "whitening": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "white_teeth": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              },
+              "skin_tone": {
+                "type": "string"
+              },
+              "temperature": {
+                "maximum": 99,
+                "minimum": 0,
+                "type": "number"
+              },
+              "intensity": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "segment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "skin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BeautySkinGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "shape": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BeautyShapeGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "makeup": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BeautyMakeupGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BeautyBodyGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "add_text_style": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "keyword": {
+            "type": "string"
+          },
+          "font_size": {
+            "type": "integer"
+          },
+          "keyword_color": {
+            "type": "string"
+          },
+          "keyword_font_size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "text",
+          "keyword"
+        ],
+        "type": "object"
+      }
+    },
+    "easy_create_material": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "audio_url": {
+            "type": "string"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "img_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text_color": {
+            "type": "string"
+          },
+          "font_size": {
+            "type": "integer"
+          },
+          "text_transform_y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "draft_url",
+          "audio_url"
+        ],
+        "type": "object"
+      }
+    },
+    "get_text_animations": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "in",
+                  "out",
+                  "loop"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "get_image_animations": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "in",
+                  "out",
+                  "loop"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "get_filters": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "maximum": 2,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "get_text_effects": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "maximum": 2,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "get_effects": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "maximum": 2,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "get_draft": {
+      "method": "GET",
+      "schema": {
+        "properties": {
+          "draft_id": {
+            "maxLength": 32,
+            "minLength": 20,
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_id"
+        ],
+        "type": "object"
+      }
+    },
+    "gen_video": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          },
+          "apiKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "gen_video_status": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "draft_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_url"
+        ],
+        "type": "object"
+      }
+    },
+    "gen_video_active_count": {
+      "method": "GET",
+      "schema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "get_audio_duration": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "mp3_url": {
+            "format": "uri",
+            "maxLength": 2083,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "mp3_url"
+        ],
+        "type": "object"
+      }
+    },
+    "timelines": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "duration": {
+            "type": "integer"
+          },
+          "num": {
+            "type": "integer"
+          },
+          "start": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "duration",
+          "num",
+          "start",
+          "type"
+        ],
+        "type": "object"
+      }
+    },
+    "audio_timelines": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "links"
+        ],
+        "type": "object"
+      }
+    },
+    "audio_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "TimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "mp3_urls": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timelines": {
+            "items": {
+              "$ref": "#/$defs/TimelineItem"
+            },
+            "type": "array"
+          },
+          "audio_effect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mp3_urls",
+          "timelines"
+        ],
+        "type": "object"
+      }
+    },
+    "imgs_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "TimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "imgs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timelines": {
+            "items": {
+              "$ref": "#/$defs/TimelineItem"
+            },
+            "type": "array"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_animation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_animation_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loop_animation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loop_animation_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "out_animation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "out_animation_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "imgs",
+          "timelines"
+        ],
+        "type": "object"
+      }
+    },
+    "caption_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "ShadowInfo": {
+            "properties": {
+              "shadow_alpha": {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "shadow_color": {
+                "type": "string"
+              },
+              "shadow_diffuse": {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "shadow_distance": {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "shadow_angle": {
+                "maximum": 180.0,
+                "minimum": -180.0,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "TimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "texts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timelines": {
+            "items": {
+              "$ref": "#/$defs/TimelineItem"
+            },
+            "type": "array"
+          },
+          "font_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keyword_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keyword_border_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keyword_font": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keyword_font_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keyword_has_shadow": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keyword_shadow_info": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ShadowInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keywords": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_animation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_animation_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loop_animation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loop_animation_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "out_animation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "out_animation_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "texts",
+          "timelines"
+        ],
+        "type": "object"
+      }
+    },
+    "effect_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "TimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "effects": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timelines": {
+            "items": {
+              "$ref": "#/$defs/TimelineItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "effects",
+          "timelines"
+        ],
+        "type": "object"
+      }
+    },
+    "filter_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "TimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "filters": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timelines": {
+            "items": {
+              "$ref": "#/$defs/TimelineItem"
+            },
+            "type": "array"
+          },
+          "intensities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "filters",
+          "timelines"
+        ],
+        "type": "object"
+      }
+    },
+    "keyframes_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "SegmentInfoItem": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "ctype": {
+            "type": "string"
+          },
+          "offsets": {
+            "type": "string"
+          },
+          "values": {
+            "type": "string"
+          },
+          "segment_infos": {
+            "items": {
+              "$ref": "#/$defs/SegmentInfoItem"
+            },
+            "type": "array"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "ctype",
+          "offsets",
+          "values",
+          "segment_infos"
+        ],
+        "type": "object"
+      }
+    },
+    "video_infos": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "TimelineItem": {
+            "properties": {
+              "start": {
+                "type": "integer"
+              },
+              "end": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "video_urls": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timelines": {
+            "items": {
+              "$ref": "#/$defs/TimelineItem"
+            },
+            "type": "array"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mask": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition_duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "video_urls",
+          "timelines"
+        ],
+        "type": "object"
+      }
+    },
+    "search_sticker": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "keyword": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "keyword"
+        ],
+        "type": "object"
+      }
+    },
+    "get_url": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "output": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "type": "object"
+      }
+    },
+    "str_list_to_objs": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "infos": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "infos"
+        ],
+        "type": "object"
+      }
+    },
+    "str_to_list": {
+      "method": "POST",
+      "schema": {
+        "properties": {
+          "obj": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "obj"
+        ],
+        "type": "object"
+      }
+    },
+    "objs_to_str_list": {
+      "method": "POST",
+      "schema": {
+        "$defs": {
+          "ObjItem": {
+            "properties": {
+              "output": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "output"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "outputs": {
+            "items": {
+              "$ref": "#/$defs/ObjItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "outputs"
+        ],
+        "type": "object"
+      }
+    }
+  }
+}

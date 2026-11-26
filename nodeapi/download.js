@@ -1802,9 +1802,61 @@ async function pathExists(targetPath) {
   }
 }
 
+const activeDraftDownloads = new Map();
+
+function downloadFiles(options, parentWindow) {
+  const { targetId } = options;
+  const current = activeDraftDownloads.get(targetId);
+  if (current) return current;
+  const task = downloadDraftFiles(options, parentWindow).finally(() => activeDraftDownloads.delete(targetId));
+  activeDraftDownloads.set(targetId, task);
+  return task;
+}
+
+async function importDraftToJianying(sourceUrl, parentWindow) {
+  let draftUrl;
+  try {
+    draftUrl = new URL(sourceUrl);
+  } catch {
+    return { success: false, code: "INVALID_DRAFT_URL", message: "请使用有效的草稿链接。" };
+  }
+  const targetId = draftUrl.searchParams.get("draft_id");
+  if (!["http:", "https:"].includes(draftUrl.protocol) || draftUrl.username || draftUrl.password
+    || !draftUrl.pathname.endsWith("/get_draft") || !/^[a-zA-Z0-9_-]{20,32}$/.test(targetId ?? "")) {
+    return { success: false, code: "INVALID_DRAFT_URL", message: "请使用带有效 draft_id 的 get_draft 链接。" };
+  }
+
+  const draft = await getDraftUrls(draftUrl.href, parentWindow);
+  if ((draft?.code !== undefined && draft.code !== 0) || !Array.isArray(draft?.files)) {
+    return { success: false, code: "GET_DRAFT_FAILED", message: draft?.message || "上游没有返回草稿文件清单。" };
+  }
+  const files = draft.files.filter((raw) => {
+    if (typeof raw !== "string" || !URL.canParse(raw)) return false;
+    const url = new URL(raw);
+    const idIndex = url.pathname.indexOf(targetId);
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password
+      && idIndex > 0 && url.pathname[idIndex - 1] === "/"
+      && url.pathname.slice(idIndex + targetId.length).startsWith("/");
+  });
+  const hasDraftJson = files.some((raw) => {
+    const { pathname } = new URL(raw);
+    return pathname.endsWith(`/${targetId}/draft_content.json`) || pathname.endsWith(`/${targetId}/draft_info.json`);
+  });
+  if (!hasDraftJson) {
+    return { success: false, code: "DRAFT_FILES_MISSING", message: "草稿清单缺少工程 JSON，请先保存草稿再导入。" };
+  }
+  return downloadFiles({
+    sourceUrl: draftUrl.href,
+    remoteFileUrls: [...new Set(files)],
+    targetId,
+    isOpenDir: false,
+    preserveExisting: true,
+  }, parentWindow);
+}
+
 // 批量下载文件主函数
-async function downloadFiles(
-  { sourceUrl, remoteFileUrls, targetId, isOpenDir },
+async function downloadDraftFiles(
+  { sourceUrl, remoteFileUrls, targetId, isOpenDir, preserveExisting = false },
   parentWindow
 ) {
   try {
@@ -1851,6 +1903,22 @@ async function downloadFiles(
 
     baseTargetDir = draftDirectoryStatus.targetDirectory;
     logger.info("[log] get target dir:", baseTargetDir);
+    const draftFinalDir = path.join(baseTargetDir, targetId);
+    if (preserveExisting) {
+      const existing = await fs.lstat(draftFinalDir).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (existing) {
+        return {
+          success: existing.isDirectory(),
+          status: "already_present",
+          draft_id: targetId,
+          draft_path: draftFinalDir,
+          message: "本机已有同 ID 草稿，请在剪映草稿箱中查看。",
+        };
+      }
+    }
 
     const draftLogId = `draft-${targetId}`;
     const tracker = createDownloadProgressTracker(targetId);
@@ -1903,14 +1971,11 @@ async function downloadFiles(
     const materialDownloadCache = new Map();
     let permissionError = null;
 
-    const draftFinalDir = path.join(baseTargetDir, targetId);
-
     // macOS：剪映的目录监听只收录「一次出现就完整」的新草稿目录，直接往正式
     // 目录里边下载边写会被跳过；因此先写隐藏暂存目录，全部就绪后再原子改名
     // 发布（见 draftStaging.js）。暂存目录在失败时保留，重新下载可续传。
-    // Windows：「直接写正式目录 + robocopy 触发扫描」的现有流程已验证可用，
-    // 保持不动，避免发布时目录被剪映/杀软占用导致改名失败等新问题。
-    const useStaging = process.platform === "darwin";
+    // Windows 的界面下载继续直接写入正式目录。MCP 导入通过暂存目录保护已有草稿。
+    const useStaging = process.platform === "darwin" || preserveExisting;
     const stagingRootDir = useStaging
       ? getStagingRootDir(baseTargetDir)
       : baseTargetDir;
@@ -2058,7 +2123,7 @@ async function downloadFiles(
       draft_url: sourceUrl,
     });
     let discovery = null;
-    // 草稿是否已完整落到正式目录；Windows 直接写正式目录，恒为 true。
+    // 直接写入正式目录的下载无需发布。暂存下载只有齐全后才会发布。
     let published = true;
 
     if (useStaging) {
@@ -2066,10 +2131,9 @@ async function downloadFiles(
       // 也不会被重新索引；失败时保留暂存目录，重新下载续传补齐后再发布。
       published = failureCount === 0 && (await pathExists(stagingDraftDir));
       if (published) {
-        const publishResult = await publishStagedDraft(
-          stagingDraftDir,
-          draftFinalDir
-        );
+        const publishResult = preserveExisting
+          ? await publishWithoutReplacing(stagingDraftDir, draftFinalDir)
+          : await publishStagedDraft(stagingDraftDir, draftFinalDir);
         logger.info(`[finish] published draft: ${draftFinalDir}`);
         if (publishResult.leftoverBackupDir) {
           logger.warn(
@@ -2083,8 +2147,8 @@ async function downloadFiles(
         logger.warn(`[finish] draft not published: ${stagingDraftDir}`);
         await appendDownloadLog({ level: "error", message }, parentWindow);
       }
-    } else {
-      // Windows：保持原有流程（直接写正式目录 + robocopy 触发扫描）
+    }
+    if (process.platform === "win32" && published) {
       await ensureWindowsDraftFilesWritable(draftFinalDir);
       await triggerDirectoryScan(draftFinalDir);
     }
@@ -2103,8 +2167,11 @@ async function downloadFiles(
     if (isOpenDir) await openDraftDirectory(resultPath);
 
     return {
-      success: failureCount === 0,
+      success: failureCount === 0 && published,
       targetDirectory: baseTargetDir,
+      draft_id: targetId,
+      draft_path: resultPath,
+      status: failureCount === 0 && published ? "downloaded" : "incomplete",
       jianyingDiscovered: Boolean(discovery?.discovered),
       message: published
         ? `文件批量保存完成，保存至目录: ${draftFinalDir}，${tracker.buildSummaryMessage()}`
@@ -2154,6 +2221,12 @@ async function downloadFiles(
   }
 }
 
+async function publishWithoutReplacing(stagingDir, finalDir) {
+  await fs.rename(stagingDir, finalDir);
+  await fs.rmdir(path.dirname(stagingDir)).catch(() => {});
+  return {};
+}
+
 async function checkUrlAccessRight(url) {
   try {
     const response = await axios({
@@ -2185,6 +2258,7 @@ module.exports = {
   getDraftUrls,
 
   downloadFiles,
+  importDraftToJianying,
 
   checkDraftDirectoryPermission,
 

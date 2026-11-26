@@ -14,6 +14,7 @@ const {
   getDraftUrls,
   updateDraftPath,
   downloadFiles,
+  importDraftToJianying,
   ensureAutoDetectedDraftPathInConfig,
   getDraftDirectoryStatus,
   autoDetectDraftPath,
@@ -24,6 +25,7 @@ const {
 } = require('./download');
 const { getMacPrivacySettingsUrl } = require('./filePermission');
 const { createMediaStore, MEDIA_EXTENSIONS } = require('./mediaStore');
+const { startDraftImportBridge } = require('./draftImportBridge');
 
 /**
  * 每次 IPC 调用时解析当前可用窗口。
@@ -66,9 +68,13 @@ console.log(process.versions.chrome);
 
 // 注册一次 IPC 处理器；窗口在每次调用时动态解析，避免窗口重建后引用失效
 function setupIpcHandlers() {
-  const mediaStore = createMediaStore(path.join(app.getPath('userData'), 'media-store'));
+  const mediaDirectory = path.join(app.getPath('userData'), 'media-store');
+  const mediaStore = createMediaStore(mediaDirectory);
   mediaStore.start().catch((error) => logger.error('素材服务启动失败:', error));
   app.once('will-quit', () => mediaStore.close());
+  const importBridge = startDraftImportBridge(mediaDirectory, (url) => importDraftToJianying(url, getActiveWindow()))
+    .catch((error) => logger.error('MCP 草稿导入服务启动失败:', error));
+  app.once('will-quit', () => importBridge.then((bridge) => bridge?.close()));
 
   ipcMain.handle('get-media-service-state', () => mediaStore.getState());
   ipcMain.handle('set-media-public-url', (event, url) => mediaStore.setPublicBaseUrl(url));

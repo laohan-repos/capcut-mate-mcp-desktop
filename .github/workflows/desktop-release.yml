@@ -1,0 +1,74 @@
+name: Desktop release builds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            arch: arm64
+            runner: macos-15
+            script: build-mac-installer
+            asset: capcut-mate-macos-arm64-installer.dmg
+          - platform: macos
+            arch: x64
+            runner: macos-15-intel
+            script: build-mac-x64-installer
+            asset: capcut-mate-macos-x64-installer.dmg
+          - platform: windows
+            arch: x64
+            runner: windows-2025
+            script: build-win-installer
+            asset: capcut-mate-windows-x64-installer.exe
+          - platform: windows
+            arch: arm64
+            runner: windows-11-arm
+            script: build-win-arm64-installer
+            asset: capcut-mate-windows-arm64-installer.exe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.arch }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - name: Install dependencies and build the desktop UI
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          npm ci
+          npm --prefix web ci
+          npm --prefix web run build
+      - name: Run desktop and MCP tests
+        if: matrix.platform == 'macos' && matrix.arch == 'arm64'
+        run: node --test --test-reporter=dot mcp/capcut-api.test.mjs nodeapi/*.test.js web/src/utils/*.test.cjs
+      - name: Build installer
+        env:
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+          npm_config_electron_mirror: https://github.com/electron/electron/releases/download/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+        run: npm run ${{ matrix.script }}
+      - name: Verify native binary and packaged MCP
+        run: node scripts/check-release-package.cjs ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: capcut-mate-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

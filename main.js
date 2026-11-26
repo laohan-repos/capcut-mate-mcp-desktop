@@ -1,5 +1,9 @@
 const { app, BrowserWindow, dialog, shell } = require('electron');
 const path = require('path');
+const appId = 'cn.laohan.capcutmatemcp';
+if (!app.commandLine.hasSwitch('user-data-dir')) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'capcut-mate'));
+}
 const logger = require('./nodeapi/logger');
 
 // 引入IPC处理程序模块，OK
@@ -12,7 +16,7 @@ const {
 
 // Windows 任务栏 / 快捷方式图标依赖 AppUserModelId，需与 electron-builder appId 一致
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.gogoshine.capcut-mate');
+  app.setAppUserModelId(appId);
 }
 
 let mainWindow;
@@ -55,6 +59,8 @@ function createWindow() {
     app.dock.setIcon(path.join(__dirname, './assets/icons/logo.png'));
   }
 
+  mainWindow.once('ready-to-show', () => mainWindow?.show());
+
   // 判断是否为开发模式
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   
@@ -68,11 +74,6 @@ function createWindow() {
     // 生产模式下加载构建后的文件
     mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
   }
-
-  // 当页面加载完成后显示窗口
-  mainWindow.webContents.on('ready-to-show', () => {
-    mainWindow.show();
-  });
 
   // 只初始化一次IPC处理程序；处理器内部会动态获取当前窗口
   if (!ipcHandlersInitialized) {
