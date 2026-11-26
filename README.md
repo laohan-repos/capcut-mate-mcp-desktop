@@ -2,6 +2,8 @@
 
 下载剪映草稿，并在「配置中心」批量上传素材、复制直链和下载原文件。内置本机素材服务，可通过 MCP 调用。
 
+[让 Agent 配置 MCP](#让-agent-配置-mcp)
+
 ## 下载桌面安装包
 
 在 [GitHub Releases](https://github.com/laohan-repos/capcut-mate-mcp-desktop/releases/latest) 选择对应系统和芯片的安装包。
@@ -15,9 +17,11 @@
 
 ## 从源码启动
 
-需要 Node.js 22.12 或更新版本。在仓库根目录安装依赖并启动前端：
+需要 Node.js 22.12 或更新版本。克隆仓库后，在仓库根目录安装依赖并启动前端。
 
 ```bash
+git clone https://github.com/laohan-repos/capcut-mate-mcp-desktop.git
+cd capcut-mate-mcp-desktop
 npm ci
 npm --prefix web ci
 npm run web:dev
@@ -31,28 +35,95 @@ npm start
 
 素材服务默认监听 `127.0.0.1:48763`。如果端口被占用，应用会选择可用端口，实际地址显示在配置中心。线上 CapCut Mate 需要可访问的素材直链，可把自己的 HTTPS 反向代理地址填入「公网直链设置」。
 
-## 接入 Codex MCP
+## 让 Agent 配置 MCP
 
-使用安装包时，可以用应用自带的 Electron 启动 MCP。保持剪映小助手运行，并将命令中的路径对应到实际安装位置。以下命令适用于装在 macOS「应用程序」目录的应用。
+在运行剪映小助手的电脑上，把下面这句话发给有本机终端权限的 Codex、Claude Code 或 WorkBuddy。
+
+> https://github.com/laohan-repos/capcut-mate-mcp-desktop 帮我按 README 给当前客户端添加剪映小助手 MCP。优先使用本机已安装的剪映小助手，最后调用 `media_status` 验证连接。
+
+接入时使用服务名 `capcut-media`，传输方式为本地 `stdio`。GitHub 地址用于读取说明和下载安装包。Agent 应先检查当前客户端是否已配置 `capcut-media`，能用的配置直接复用，修改时只更新这一项。
+
+### 确定本地启动路径
+
+优先使用已安装的桌面版。v1.1.0 安装包内置 MCP。未安装时，可从 [GitHub Releases](https://github.com/laohan-repos/capcut-mate-mcp-desktop/releases/latest) 选择当前系统与芯片的安装包，也可按[从源码启动](#从源码启动)运行。打开剪映小助手，并在接入期间保持运行。
+
+**macOS 安装版**，以应用放在「应用程序」目录为例。
 
 ```bash
-codex mcp add capcut-media --env ELECTRON_RUN_AS_NODE=1 -- \
-  "/Applications/剪映小助手.app/Contents/MacOS/剪映小助手" \
-  "/Applications/剪映小助手.app/Contents/Resources/app.asar/mcp/media-server.mjs"
+capcut_exe='/Applications/剪映小助手.app/Contents/MacOS/剪映小助手'
+capcut_mcp='/Applications/剪映小助手.app/Contents/Resources/app.asar/mcp/media-server.mjs'
 ```
 
-Windows 用户可在 PowerShell 中执行以下命令，并填写实际安装目录。
+**Windows 安装版**，在 PowerShell 中填写实际安装目录。可从剪映小助手快捷方式的「目标」找到它。
 
 ```powershell
-$installed = 'C:/实际安装目录'
-codex mcp add capcut-media --env ELECTRON_RUN_AS_NODE=1 -- "$installed/剪映小助手.exe" "$installed/resources/app.asar/mcp/media-server.mjs"
+$capcut_dir = 'C:/实际安装目录'
+$capcut_exe = Join-Path $capcut_dir '剪映小助手.exe'
+$capcut_mcp = Join-Path $capcut_dir 'resources/app.asar/mcp/media-server.mjs'
 ```
 
-Claude Code 和 WorkBuddy 使用相同的 stdio 命令、脚本路径和环境变量。使用源码时，在仓库根目录用 Node 注册 MCP。
+安装版使用应用自带的 Electron。确认应用可执行文件和 `app.asar` 存在，并保留脚本路径中的 `app.asar/mcp/`。源码版使用 Node.js 22.12 或更新版本，提前在仓库根目录运行 `npm ci`。下方所有路径都使用本机绝对路径。
+
+### 接入 Codex MCP
+
+安装版在设置上面的两个路径后执行。
+
+```sh
+codex mcp add capcut-media --env ELECTRON_RUN_AS_NODE=1 -- "$capcut_exe" "$capcut_mcp"
+codex mcp get capcut-media
+```
+
+源码版在仓库根目录执行。
 
 ```bash
-codex mcp add capcut-media -- node "$(pwd)/mcp/media-server.mjs"
+codex mcp add capcut-media -- "$(command -v node)" "$(pwd)/mcp/media-server.mjs"
 ```
+
+```powershell
+codex mcp add capcut-media -- (Get-Command node -CommandType Application).Source (Join-Path (Get-Location).Path 'mcp/media-server.mjs')
+```
+
+### 接入 Claude Code
+
+以下命令添加到用户配置，供各项目使用。安装版使用上面的路径。
+
+```sh
+claude mcp add --env ELECTRON_RUN_AS_NODE=1 --transport stdio --scope user capcut-media -- "$capcut_exe" "$capcut_mcp"
+claude mcp get capcut-media
+```
+
+源码版填写 Node 可执行文件和剪映小助手源码脚本的实际绝对路径。
+
+```sh
+claude mcp add --transport stdio --scope user capcut-media -- "<Node 可执行文件绝对路径>" "<仓库绝对路径>/mcp/media-server.mjs"
+```
+
+### 接入 WorkBuddy
+
+在 WorkBuddy 的 MCP 配置中，将以下条目合并到已有的 `mcpServers`。也可编辑用户目录下的 `.workbuddy/mcp.json`。保存后，在 WorkBuddy 的连接器中启用 `capcut-media`，按客户端提示信任。
+
+```json
+{
+  "mcpServers": {
+    "capcut-media": {
+      "type": "stdio",
+      "command": "/Applications/剪映小助手.app/Contents/MacOS/剪映小助手",
+      "args": ["/Applications/剪映小助手.app/Contents/Resources/app.asar/mcp/media-server.mjs"],
+      "env": {
+        "ELECTRON_RUN_AS_NODE": "1"
+      }
+    }
+  }
+}
+```
+
+Windows 使用实际安装路径替换 `command` 和 `args` 中的路径，JSON 路径可用 `C:/...` 写法。源码版将 `command` 指向 Node 可执行文件，将 `args` 中的路径指向仓库里的 `mcp/media-server.mjs`，`env` 可省略。
+
+相关文档见 [Claude Code MCP](https://code.claude.com/docs/en/mcp) 和 [WorkBuddy MCP 配置](https://open.workbuddy.cn/docs/connector)。
+
+### 验证连接
+
+配置后重新启动客户端，让 Agent 调用 `capcut-media` 的 `media_status`。返回 `port`、`localBaseUrl` 和 `count` 即表示 Agent 可以访问本机素材服务。若提示素材服务尚未运行，打开剪映小助手，在「配置中心 → 素材上传与下载」确认本机服务地址后重试。
 
 | 工具 | 用途 |
 | --- | --- |
