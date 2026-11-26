@@ -5,7 +5,7 @@ const officialBase = "https://capcut-mate.jcaigc.cn";
 const apiPrefix = "/openapi/capcut-mate/v1/";
 const pointsAddress = "https://jcaigc.cn/openapi/v1/user/points";
 const draftId = z.string().regex(/^[A-Za-z0-9_-]{20,32}$/).describe("草稿 ID。");
-const httpUrl = z.url({ protocol: /^https?$/ }).describe("HTTP(S) 直链。使用线上草稿 API 时须能从公网访问。");
+const httpUrl = z.url({ protocol: /^https?$/ }).describe("HTTP(S) 直链。");
 const draftUrl = httpUrl.refine((value) => {
   const url = new URL(value);
   return url.pathname.endsWith("/get_draft") && draftId.safeParse(url.searchParams.get("draft_id")).success;
@@ -75,9 +75,9 @@ const descriptions = {
   create_draft: "创建空白剪映草稿。传入画布宽高（像素），竖屏常用 1080×1920。返回 draft_url，后续编排和保存复用该链接。",
   save_draft: "保存当前草稿并返回 draft_url。添加完素材和字幕后调用。",
   get_draft: "获取已保存草稿的工程文件清单。传 draft_url 或 draft_id。",
-  add_videos: "按时间轴添加一组视频。视频直链可由 media_upload 提供。返回轨道和片段 ID。",
+  add_videos: "按时间轴添加一组视频。支持 media_upload 返回的本机链接，调用 import_draft_to_jianying 时会将本机素材复制进草稿。返回轨道和片段 ID。",
   add_audios: "按时间轴添加一组配音、音乐或音效。时间单位为微秒。",
-  add_images: "按时间轴添加一组图片。返回 segment_ids，可接 add_keyframes 添加动画。",
+  add_images: "按时间轴添加一组图片。支持 media_upload 返回的本机链接，调用 import_draft_to_jianying 时会将本机素材复制进草稿。返回 segment_ids，可接 add_keyframes 添加动画。",
   add_sticker: "用 search_sticker 返回的 sticker_id 将贴纸放到指定时间区间。",
   add_keyframes: "按 segment_id 给已有片段设置缩放、位置、旋转或透明度关键帧。",
   add_captions: "批量写入已有标题、文字或字幕。每条文字指定微秒起止时间，可在工具层设置它们共用的字体和样式。",
@@ -119,6 +119,10 @@ const mutations = new Set([
   "add_mask_keyframes", "add_beauty", "easy_create_material", "gen_video",
 ]);
 const mediaFields = new Set(["video_url", "audio_url", "image_url", "img_url", "mp3_url", "links"]);
+const localDraftMedia = {
+  add_videos: { list: "video_infos", field: "video_url", kind: "video" },
+  add_images: { list: "image_infos", field: "image_url", kind: "image" },
+};
 const serializedResults = {
   audio_infos: "infos", imgs_infos: "infos", caption_infos: "infos", effect_infos: "infos",
   filter_infos: "infos", video_infos: "infos", keyframes_infos: "keyframes_infos",
@@ -169,7 +173,7 @@ function errorData(operation, draft_url, code, message, details = {}) {
   return { operation, code, message, ...(draft_url ? { draft_url } : {}), retryable: false, ...details };
 }
 
-export function registerCapcutTools(server, { result, importDraft, env = process.env }) {
+export function registerCapcutTools(server, { result, importDraft, referenceLocalMedia, env = process.env }) {
   const base = (env.CAPCUT_MATE_BASE_URL || officialBase).replace(/\/+$/, "");
   const apiKey = env.CAPCUT_MATE_API_KEY;
   const isOfficial = base === officialBase;
@@ -199,18 +203,33 @@ export function registerCapcutTools(server, { result, importDraft, env = process
     if ((name === "get_points" || (name === "gen_video" && isOfficial)) && !apiKey) {
       return result(errorData(name, draft_url, "API_KEY_REQUIRED", "请在 MCP 环境中配置 CAPCUT_MATE_API_KEY。"), true);
     }
+    const local = isOfficial && localDraftMedia[name];
+    if (local && loopbackMedia(args)) {
+      const { list, field, kind } = local;
+      const items = await Promise.all(args[list].map(async (item) => {
+        const url = item[field];
+        if (!loopbackMedia(url, field)) return item;
+        const reference = await referenceLocalMedia(url, kind);
+        return reference ? { ...item, [field]: reference } : item;
+      }));
+      args = { ...args, [list]: items };
+    }
     if (isOfficial && loopbackMedia(args)) {
       return result({
         status: "needs_action",
         code: "MEDIA_LINK_LOCAL_ONLY",
         operation: name,
         ...(draft_url ? { draft_url } : {}),
-        message: "素材链接只能在本机访问。本次操作尚未提交到线上 API。",
+        message: local
+          ? "部分链接未匹配到小助手素材库中相应类型的原文件，本次未向线上 API 提交。"
+          : "素材链接只能在本机访问。本次操作尚未提交到线上 API。",
         upstream_called: false,
         retryable: false,
         next_action: {
-          tool: "media_status",
-          instruction: "检查 publicBaseUrl。若为空，请让用户在「配置中心 → 公网直链设置」填写可访问的公网地址。配置后用 media_list 获取已上传素材的新直链，替换链接后重试同一操作，可继续使用原草稿。",
+          tool: local ? "media_list" : "media_status",
+          instruction: local
+            ? "从 media_list 选取对应图片或视频的链接。若原文件还未加入素材库，可用 media_upload 添加，再继续原草稿。"
+            : "检查 publicBaseUrl。若为空，请让用户在「配置中心 → 公网直链设置」填写可访问的公网地址。配置后用 media_list 获取已上传素材的新直链，替换链接后重试同一操作，可继续使用原草稿。",
         },
       });
     }

@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio.js");
@@ -57,18 +59,34 @@ async function verify() {
     timeout: 15_000,
   });
 
-  const preventNetwork = "globalThis.fetch = () => { throw new Error('Unexpected upstream request'); };";
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "capcut-package-check-"));
+  const id = randomUUID();
+  const simulateDraftApi = `
+    globalThis.fetch = (resource, options) => {
+      const [item] = JSON.parse(JSON.parse(options.body).video_infos);
+      if (item.video_url !== "https://capcut-local.invalid/media/${id}/asset.mp4") {
+        throw new Error("Expected a local video reference in the upstream payload");
+      }
+      return Response.json({ code: 0, segment_ids: ["clip-1"] });
+    };
+  `;
   const transport = new StdioClientTransport({
     command: executable,
     args: [
       "--import",
-      `data:text/javascript,${encodeURIComponent(preventNetwork)}`,
+      `data:text/javascript,${encodeURIComponent(simulateDraftApi)}`,
       path.join(archive, "mcp", "media-server.mjs"),
     ],
-    env: { ELECTRON_RUN_AS_NODE: "1", CAPCUT_MATE_BASE_URL: "https://capcut-mate.jcaigc.cn" },
+    env: {
+      ELECTRON_RUN_AS_NODE: "1",
+      CAPCUT_MATE_BASE_URL: "https://capcut-mate.jcaigc.cn",
+      CAPCUT_MATE_MEDIA_STORE: directory,
+    },
   });
   const client = new Client({ name: "capcut-package-check", version: "1.0.0" });
   try {
+    fs.mkdirSync(path.join(directory, id));
+    fs.writeFileSync(path.join(directory, id, "sample.mp4"), "sample");
     await client.connect(transport, { timeout: 20_000 });
     assert.equal(client.getServerVersion().version, version);
     const { tools } = await client.listTools();
@@ -80,15 +98,15 @@ async function verify() {
       name: "add_videos",
       arguments: {
         draft_url: "https://capcut-mate.jcaigc.cn/openapi/capcut-mate/v1/get_draft?draft_id=20261126090000deadbeef",
-        video_infos: [{ video_url: "http://127.0.0.1:48763/media/sample.mp4", start: 0, end: 1_000_000 }],
+        video_infos: [{ video_url: `http://127.0.0.1:48763/media/${id}/sample.mp4`, start: 0, end: 1_000_000 }],
       },
     });
     assert.notEqual(localMedia.isError, true);
-    assert.equal(localMedia.structuredContent.status, "needs_action");
-    assert.equal(localMedia.structuredContent.upstream_called, false);
+    assert.deepEqual(localMedia.structuredContent.segment_ids, ["clip-1"]);
     console.log(`Verified native ${process.platform} ${arch} package, ${tools.length} MCP tools and local-media response (v${version}).`);
   } finally {
     await client.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 }
 

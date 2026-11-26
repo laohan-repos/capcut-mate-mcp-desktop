@@ -10,6 +10,7 @@ const DEFAULT_PORT = 48763;
 const HEALTH_PATH = "/media-health";
 const SERVICE_HEADER = "x-capcut-mate-media";
 const FILE_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const DRAFT_MEDIA_HOST = "capcut-local.invalid";
 const MEDIA_TYPES = {
   mp4: "video/mp4", mov: "video/quicktime", m4v: "video/mp4", webm: "video/webm",
   mkv: "video/x-matroska", avi: "video/x-msvideo", mpg: "video/mpeg",
@@ -61,6 +62,20 @@ function validPort(port) {
 
 function localUrl(port) {
   return `http://${HOST}:${port}`;
+}
+
+function mediaPath(id, filename) {
+  return `/media/${id}/${encodeURIComponent(filename)}`;
+}
+
+function mediaIdFromPath(pathname) {
+  const id = /^\/media\/([^/]+)\/[^/]+$/.exec(pathname)?.[1];
+  return FILE_ID.test(id) ? id : null;
+}
+
+function draftMediaReference(file) {
+  const extension = path.extname(file.name).toLowerCase();
+  return `https://${DRAFT_MEDIA_HOST}${mediaPath(file.id, `asset${extension}`)}`;
 }
 
 function createMediaStore(directory, { useRunningService = false } = {}) {
@@ -186,6 +201,27 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
     }
   }
 
+  async function referenceLocalMedia(value, kind) {
+    const url = new URL(value);
+    const port = Number(url.port);
+    if (url.hostname !== HOST || !validPort(port)) return null;
+    const file = await getFile(mediaIdFromPath(url.pathname));
+    if (!file || !file.type.startsWith(`${kind}/`)) return null;
+    // Existing links remain valid after the desktop service changes ports.
+    if (url.href !== localUrl(port) + mediaPath(file.id, file.name)) return null;
+    return draftMediaReference(file);
+  }
+
+  async function resolveDraftMedia(value) {
+    const url = new URL(value);
+    if (url.hostname !== DRAFT_MEDIA_HOST) return null;
+    const file = await getFile(mediaIdFromPath(url.pathname));
+    if (!file || url.href !== draftMediaReference(file)) {
+      throw new Error("本机素材缺失或引用无效。请确认原文件仍在剪映小助手的素材库中。");
+    }
+    return file;
+  }
+
   async function serve(request, response) {
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.writeHead(405, { Allow: "GET, HEAD" }).end();
@@ -236,7 +272,7 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
       localBaseUrl,
       publicBaseUrl,
       files: files.filter(Boolean).sort((a, b) => b.addedAt - a.addedAt || a.id.localeCompare(b.id))
-        .map(({ id, name, size }) => ({ id, name, size, url: `${baseUrl}/media/${id}/${encodeURIComponent(name)}` })),
+        .map(({ id, name, size }) => ({ id, name, size, url: baseUrl + mediaPath(id, name) })),
     };
   }
 
@@ -302,7 +338,7 @@ function createMediaStore(directory, { useRunningService = false } = {}) {
     }
   }
 
-  const media = { getState, getFile, importFiles, saveFile };
+  const media = { getState, getFile, importFiles, saveFile, referenceLocalMedia, resolveDraftMedia };
   return useRunningService ? media : { ...media, start, close, setPublicBaseUrl };
 }
 

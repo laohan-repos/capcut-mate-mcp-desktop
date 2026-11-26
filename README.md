@@ -134,13 +134,13 @@ Windows 使用实际安装路径替换 `command` 和 `args` 中的路径，JSON 
 
 ### 用 MCP 创建并导入剪映草稿
 
-`create_draft` 返回草稿链接。将 `media_upload` 得到的素材直链和该草稿链接交给 `add_videos`、`add_images`、`add_audios` 或 `add_captions`。所有时间字段使用微秒，批量素材和字幕传 JSON 数组。可使用 `add_keyframes` 等工具追加动画与效果。
+`create_draft` 返回草稿链接。图片和视频可以直接使用 `media_upload` 或 `media_list` 返回的本机链接，分别传给 `add_images` 和 `add_videos`。这个流程无需配置公网地址。所有时间字段使用微秒，批量素材和字幕传 JSON 数组。可使用 `add_keyframes` 等工具追加动画与效果。
 
-编排完成后调用 `save_draft`。用 `get_draft` 可以查看工程文件清单，用 `import_draft_to_jianying` 可以通过正在运行的桌面助手导入配置中心指定的剪映草稿目录。重复导入同 ID 草稿时，会返回已有目录。
+编排完成后调用 `save_draft`，再调用 `import_draft_to_jianying`。桌面版 v1.1.2 起会把素材库里的原文件复制到剪映草稿内并更新路径。重复导入同 ID 草稿时，会返回已有目录。
 
-MCP 默认连接作者的线上 API。自部署时，在 MCP 环境中设置 `CAPCUT_MATE_BASE_URL`。线上 API 需要能访问素材直链，请使用配置中心设置的公网地址。云端导出和余额查询读取 MCP 环境变量 `CAPCUT_MATE_API_KEY`，云端导出按上游规则计费。原素材上传和下载用上表中的本机工具。
+MCP 默认连接作者的线上 API。自部署时，在 MCP 环境中设置 `CAPCUT_MATE_BASE_URL`。云端导出或其他需要线上读取原文件的接口仍需要线上可访问的素材链接。云端导出和余额查询读取 MCP 环境变量 `CAPCUT_MATE_API_KEY`，云端导出按上游规则计费。
 
-从 v1.1.1 起，线上草稿操作收到本机素材链接时，MCP 返回 `status: needs_action` 和 `code: MEDIA_LINK_LOCAL_ONLY`，表示本次素材尚未提交。Agent 可先调用 `media_status` 检查公网地址，再用 `media_list` 取得已上传素材的当前直链。替换链接后继续同一草稿。
+如果 `add_images` 或 `add_videos` 返回 `MEDIA_LINK_LOCAL_ONLY`，可调用 `media_list` 确认链接对应素材库中正确类型的原文件，再继续原草稿。
 
 接口参数对照 [CapCut Mate 官方文档](https://docs.jcaigc.cn/capcut-mate/)。CapCut Mate v1 的入参模型来源提交记录在 `mcp/capcut-api-schema.json`。
 

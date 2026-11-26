@@ -12,6 +12,7 @@ const {
 } = require("./draftPathDetect");
 const { v4: uuidv4 } = require('uuid');
 const { downloadBinaryToFile } = require("./resumableDownload");
+const { createMediaStore } = require("./mediaStore");
 const draftPaths = require("./draftPaths");
 const {
   getStagingRootDir,
@@ -31,6 +32,9 @@ const {
 } = require("./filePermission");
 
 const RECORD_MAX = 500;
+const draftMediaStore = createMediaStore(path.join(app.getPath("userData"), "media-store"), {
+  useRunningService: true,
+});
 
 /** 下载失败是因为没有目标目录写入权限（macOS TCC 或文件系统 ACL） */
 const DRAFT_PERMISSION_DENIED = "DRAFT_PERMISSION_DENIED";
@@ -255,16 +259,24 @@ async function downloadRemoteMaterial(fileUrl, draftRootDir, subDir, baseName, f
   const destDir = draftPaths.materialLocalDir(draftRootDir, subDir);
   const fallbackPath = path.join(destDir, buildMaterialFilename(baseName, fallbackExt));
 
-  return withDownloadSlot(() =>
-    downloadBinaryToFile(fileUrl, {
+  return withDownloadSlot(async () => {
+    const localFile = await draftMediaStore.resolveDraftMedia(fileUrl);
+    if (localFile) {
+      const filename = buildMaterialFilename(baseName, path.extname(localFile.name));
+      const destination = path.join(destDir, filename);
+      await fs.mkdir(destDir, { recursive: true });
+      await draftMediaStore.saveFile(localFile.filePath, destination);
+      return destination;
+    }
+    return downloadBinaryToFile(fileUrl, {
       destPath: fallbackPath,
       resolveDestPath: (headers) => {
         const ext = inferExtFromContentType(headers["content-type"], fallbackExt);
         return path.join(destDir, buildMaterialFilename(baseName, ext));
       },
       requestHeaders: axiosConfig.headers,
-    })
-  );
+    });
+  });
 }
 
 function sanitizeFilename(value) {

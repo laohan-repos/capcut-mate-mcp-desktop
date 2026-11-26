@@ -130,6 +130,7 @@ server.registerTool(
 
 registerCapcutTools(server, {
   result,
+  referenceLocalMedia: store.referenceLocalMedia,
   importDraft: (url, signal) => draftBridge.requestDraftImport(directory, url, signal),
 });
 

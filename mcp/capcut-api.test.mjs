@@ -8,6 +8,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import bridge from "../nodeapi/draftImportBridge.js";
+import mediaStore from "../nodeapi/mediaStore.js";
 
 const prefix = "/openapi/capcut-mate/v1/";
 const draftId = "20261126090000deadbeef";
@@ -129,21 +130,64 @@ test("MCP exposes CapCut drafts alongside our media tools and imports through de
   }
 });
 
-test("official MCP returns an actionable status for local media without submitting the batch", async () => {
+test("official MCP submits managed picture and video references while rejecting unrelated loopback links", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "capcut-local-media-test-"));
+  const store = mediaStore.createMediaStore(path.join(directory, "media-store"));
   const serverPath = fileURLToPath(new URL("./media-server.mjs", import.meta.url));
-  const avoidNetwork = "globalThis.fetch = () => { throw new Error('Unexpected upstream request'); };";
+  const simulateDraftApi = `
+    const fetchLocal = globalThis.fetch;
+    globalThis.fetch = (resource, options) => {
+      const url = new URL(resource);
+      if (url.hostname === "127.0.0.1" && url.pathname === "/media-health") {
+        return fetchLocal(resource, options);
+      }
+      if (url.origin !== "https://capcut-mate.jcaigc.cn") throw new Error("Unexpected request");
+      const body = JSON.parse(options.body);
+      return Response.json({ code: 0, segment_ids: ["clip-1"], submitted: body });
+    };
+  `;
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["--import", `data:text/javascript,${encodeURIComponent(avoidNetwork)}`, serverPath],
-    env: { CAPCUT_MATE_BASE_URL: "https://capcut-mate.jcaigc.cn" },
+    args: ["--import", `data:text/javascript,${encodeURIComponent(simulateDraftApi)}`, serverPath],
+    env: {
+      CAPCUT_MATE_BASE_URL: "https://capcut-mate.jcaigc.cn",
+      CAPCUT_MATE_MEDIA_STORE: path.join(directory, "media-store"),
+    },
   });
   const client = new Client({ name: "capcut-mcp-local-media-test", version: "1.0.0" });
   try {
+    await store.start();
+    const paths = ["视频.mp4", "配图 #1.jpg"].map((name) => path.join(directory, name));
+    await Promise.all(paths.map((filename) => fs.writeFile(filename, "test material")));
     await client.connect(transport);
     const draft_url = `https://capcut-mate.jcaigc.cn${prefix}get_draft?draft_id=${draftId}`;
+    const uploaded = await client.callTool({ name: "media_upload", arguments: { paths } });
+    assert.equal(uploaded.structuredContent.linkScope, "local");
+    const video = uploaded.structuredContent.files.find((file) => file.name.endsWith(".mp4"));
+    const image = uploaded.structuredContent.files.find((file) => file.name.endsWith(".jpg"));
+    const savedVideoUrl = new URL(video.url);
+    savedVideoUrl.port = savedVideoUrl.port === "48763" ? "48764" : "48763";
+    for (const [name, list, field, source, url] of [
+      ["add_videos", "video_infos", "video_url", video, savedVideoUrl.href],
+      ["add_images", "image_infos", "image_url", image, image.url],
+    ]) {
+      const response = await client.callTool({
+        name,
+        arguments: { draft_url, [list]: [{ [field]: url, start: 0, end: 1_000_000 }] },
+      });
+      assert.notEqual(response.isError, true);
+      assert.deepEqual(response.structuredContent.segment_ids, ["clip-1"]);
+      const [item] = JSON.parse(response.structuredContent.submitted[list]);
+      assert.equal(item[field], `https://capcut-local.invalid/media/${source.id}/asset${path.extname(source.name)}`);
+      const resolved = await store.resolveDraftMedia(item[field]);
+      assert.equal(resolved.name, source.name);
+    }
+
     const cases = [
       ["add_videos", "video_infos", "video_url", "http://127.0.0.1:48763/media/start.mp4"],
       ["add_images", "image_infos", "image_url", "http://localhost:48763/media/image.png"],
+      ["add_images", "image_infos", "image_url", video.url],
+      ["add_images", "image_infos", "image_url", `${image.url}?override=1`],
       ["add_audios", "audio_infos", "audio_url", "http://[::1]:48763/media/voice.mp3"],
     ];
     for (const [name, list, field, url] of cases) {
@@ -160,11 +204,13 @@ test("official MCP returns an actionable status for local media without submitti
       assert.equal(data.draft_url, draft_url);
       assert.equal(data.upstream_called, false);
       assert.equal(data.retryable, false);
-      assert.equal(data.next_action.tool, "media_status");
+      assert.equal(data.next_action.tool, name === "add_audios" ? "media_status" : "media_list");
       assert.match(data.next_action.instruction, /media_list/);
       assert.equal(data.segment_ids, undefined);
     }
   } finally {
     await client.close();
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
