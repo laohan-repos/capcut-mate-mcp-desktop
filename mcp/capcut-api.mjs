@@ -200,8 +200,19 @@ export function registerCapcutTools(server, { result, importDraft, env = process
       return result(errorData(name, draft_url, "API_KEY_REQUIRED", "请在 MCP 环境中配置 CAPCUT_MATE_API_KEY。"), true);
     }
     if (isOfficial && loopbackMedia(args)) {
-      return result(errorData(name, draft_url, "MEDIA_LINK_LOCAL_ONLY",
-        "线上草稿 API 无法读取本机链接。请在配置中心设置公网直链后，重新使用素材服务返回的链接。"), true);
+      return result({
+        status: "needs_action",
+        code: "MEDIA_LINK_LOCAL_ONLY",
+        operation: name,
+        ...(draft_url ? { draft_url } : {}),
+        message: "素材链接只能在本机访问。本次操作尚未提交到线上 API。",
+        upstream_called: false,
+        retryable: false,
+        next_action: {
+          tool: "media_status",
+          instruction: "检查 publicBaseUrl。若为空，请让用户在「配置中心 → 公网直链设置」填写可访问的公网地址。配置后用 media_list 获取已上传素材的新直链，替换链接后重试同一操作，可继续使用原草稿。",
+        },
+      });
     }
     const url = name === "get_draft" ? lookupUrl(args) : apiUrl(name);
     const settings = { method: endpoint.method, redirect: "error" };

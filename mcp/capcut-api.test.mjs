@@ -73,7 +73,7 @@ test("MCP exposes CapCut drafts alongside our media tools and imports through de
     assert.equal(created.structuredContent.draft_url, draftUrl);
     assert.deepEqual(requests[0].body, { height: 1920, width: 1080 });
 
-    const video = { video_url: "https://example.test/start.mp4", start: 0, end: 5_000_000 };
+    const video = { video_url: `${base}/media/start.mp4`, start: 0, end: 5_000_000 };
     const added = await call("add_videos", { draft_url: draftUrl, video_infos: [video] });
     assert.deepEqual(added.structuredContent.segment_ids, ["clip-1"]);
     assert.deepEqual(JSON.parse(requests[1].body.video_infos), [video]);
@@ -126,5 +126,45 @@ test("MCP exposes CapCut drafts alongside our media tools and imports through de
     api?.closeAllConnections();
     if (api) await new Promise((resolve) => api.close(resolve));
     await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("official MCP returns an actionable status for local media without submitting the batch", async () => {
+  const serverPath = fileURLToPath(new URL("./media-server.mjs", import.meta.url));
+  const avoidNetwork = "globalThis.fetch = () => { throw new Error('Unexpected upstream request'); };";
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--import", `data:text/javascript,${encodeURIComponent(avoidNetwork)}`, serverPath],
+    env: { CAPCUT_MATE_BASE_URL: "https://capcut-mate.jcaigc.cn" },
+  });
+  const client = new Client({ name: "capcut-mcp-local-media-test", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const draft_url = `https://capcut-mate.jcaigc.cn${prefix}get_draft?draft_id=${draftId}`;
+    const cases = [
+      ["add_videos", "video_infos", "video_url", "http://127.0.0.1:48763/media/start.mp4"],
+      ["add_images", "image_infos", "image_url", "http://localhost:48763/media/image.png"],
+      ["add_audios", "audio_infos", "audio_url", "http://[::1]:48763/media/voice.mp3"],
+    ];
+    for (const [name, list, field, url] of cases) {
+      const response = await client.callTool({
+        name,
+        arguments: { draft_url, [list]: [{ [field]: url, start: 0, end: 1_000_000 }] },
+      });
+      assert.notEqual(response.isError, true);
+      const data = response.structuredContent;
+      assert.deepEqual(JSON.parse(response.content[0].text), data);
+      assert.equal(data.status, "needs_action");
+      assert.equal(data.code, "MEDIA_LINK_LOCAL_ONLY");
+      assert.equal(data.operation, name);
+      assert.equal(data.draft_url, draft_url);
+      assert.equal(data.upstream_called, false);
+      assert.equal(data.retryable, false);
+      assert.equal(data.next_action.tool, "media_status");
+      assert.match(data.next_action.instruction, /media_list/);
+      assert.equal(data.segment_ids, undefined);
+    }
+  } finally {
+    await client.close();
   }
 });
