@@ -61,13 +61,20 @@ async function verify() {
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "capcut-package-check-"));
   const id = randomUUID();
+  const audioId = randomUUID();
   const simulateDraftApi = `
     globalThis.fetch = (resource, options) => {
-      const [item] = JSON.parse(JSON.parse(options.body).video_infos);
-      if (item.video_url !== "https://capcut-local.invalid/media/${id}/asset.mp4") {
-        throw new Error("Expected a local video reference in the upstream payload");
+      const body = JSON.parse(options.body);
+      const operation = new URL(resource).pathname.split("/").pop();
+      if (operation === "add_videos"
+        && JSON.parse(body.video_infos)[0].video_url === "https://capcut-local.invalid/media/${id}/asset.mp4") {
+        return Response.json({ code: 0, segment_ids: ["clip-1"] });
       }
-      return Response.json({ code: 0, segment_ids: ["clip-1"] });
+      if (operation === "add_audios"
+        && JSON.parse(body.audio_infos)[0].audio_url === "https://capcut-local.invalid/media/${audioId}/asset.mp3") {
+        return Response.json({ code: 0, audio_ids: ["voice-1"] });
+      }
+      throw new Error("Unexpected upstream request during the package check");
     };
   `;
   const transport = new StdioClientTransport({
@@ -87,6 +94,8 @@ async function verify() {
   try {
     fs.mkdirSync(path.join(directory, id));
     fs.writeFileSync(path.join(directory, id, "sample.mp4"), "sample");
+    fs.mkdirSync(path.join(directory, audioId));
+    fs.copyFileSync(path.join(__dirname, "fixtures", "voice.test.mp3"), path.join(directory, audioId, "voice.mp3"));
     await client.connect(transport, { timeout: 20_000 });
     assert.equal(client.getServerVersion().version, version);
     const { tools } = await client.listTools();
@@ -94,16 +103,27 @@ async function verify() {
     for (const name of ["media_upload", "create_draft", "save_draft", "import_draft_to_jianying"]) {
       assert.ok(tools.some((tool) => tool.name === name), `Packaged MCP tool is missing: ${name}`);
     }
+    const draft_url = "https://capcut-mate.jcaigc.cn/openapi/capcut-mate/v1/get_draft?draft_id=20261126090000deadbeef";
     const localMedia = await client.callTool({
       name: "add_videos",
       arguments: {
-        draft_url: "https://capcut-mate.jcaigc.cn/openapi/capcut-mate/v1/get_draft?draft_id=20261126090000deadbeef",
+        draft_url,
         video_infos: [{ video_url: `http://127.0.0.1:48763/media/${id}/sample.mp4`, start: 0, end: 1_000_000 }],
       },
     });
     assert.notEqual(localMedia.isError, true);
     assert.deepEqual(localMedia.structuredContent.segment_ids, ["clip-1"]);
-    console.log(`Verified native ${process.platform} ${arch} package, ${tools.length} MCP tools and local-media response (v${version}).`);
+    const audio_url = `http://127.0.0.1:48763/media/${audioId}/voice.mp3`;
+    const measured = await client.callTool({ name: "get_audio_duration", arguments: { mp3_url: audio_url } });
+    assert.notEqual(measured.isError, true, JSON.stringify(measured));
+    assert.equal(measured.structuredContent.duration, 125_000);
+    const added = await client.callTool({
+      name: "add_audios",
+      arguments: { draft_url, audio_infos: [{ audio_url, start: 0, end: measured.structuredContent.duration }] },
+    });
+    assert.notEqual(added.isError, true, JSON.stringify(added));
+    assert.deepEqual(added.structuredContent.audio_ids, ["voice-1"]);
+    console.log(`Verified native ${process.platform} ${arch} package, ${tools.length} MCP tools and local-audio decoding (v${version}).`);
   } finally {
     await client.close();
     fs.rmSync(directory, { recursive: true, force: true });
